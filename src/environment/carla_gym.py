@@ -12,10 +12,8 @@ from gym import spaces
 import numpy as np
 import matplotlib.pyplot as plt
 
-# from .unitConversion import get_pos_from_worldcoord
 from .cameras import build_cam
-from .utils import loc_dist, pflat, get_origin
-
+from .utils import loc_dist, pflat
 
 # render quality of CARLA
 QUALITY = ("Epic", "Low")
@@ -119,7 +117,7 @@ def draw_bbox(obs, info):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         axs[cam // 2, cam % 2].imshow(img)
         axs[cam // 2, cam % 2].set_title(f'Camera {cam + 1}')
-    
+
     return fig, axs
 
 
@@ -145,7 +143,6 @@ class CarlaMultiCameraEnv(gym.Env):
         self.client.set_timeout(10.0)
         self.world = self.client.load_world(self.opts["map"])
 
-        # self.origin = get_origin(self.opts)
         # CarlaX is xy indexing; x,y (w,h) (n_col,n_row)
         x_min, x_max, _, _, _, _ = opts["spawn_area"]
         self.map_width = x_max - x_min
@@ -200,8 +197,8 @@ class CarlaMultiCameraEnv(gym.Env):
         # if action space only contains pitch-yaw, location is fixed
         action_space = self.opts["env_action_space"].split("-")
         default_location, default_rotation, default_fov = np.array(self.opts["cam_pos_lst"]), \
-                                                          np.array(self.opts["cam_dir_lst"]), \
-                                                          np.array(self.opts["cam_fov"]).repeat([self.opts["num_cam"]])
+            np.array(self.opts["cam_dir_lst"]), \
+            np.array(self.opts["cam_fov"]).repeat([self.opts["num_cam"]])
         if 'x' in action_space: default_location[:, 0] = location[:, 0]
         if 'y' in action_space: default_location[:, 1] = location[:, 1]
         if 'z' in action_space: default_location[:, 2] = location[:, 2]
@@ -212,7 +209,7 @@ class CarlaMultiCameraEnv(gym.Env):
 
         act = np.concatenate([default_location, default_rotation, default_fov[:, None]], axis=1)
         return act
-    
+
     def reset(self, seed=None):
         # if a new seed is provided, set generator to used new seed
         # otherwise use old seed
@@ -287,7 +284,7 @@ class CarlaMultiCameraEnv(gym.Env):
         # Set the reward for the current step
         reward = 0
         # Set condition for the end of episode: after a fixed number of step() call
-        done = self.step_counter >= self.opts["num_frame"] # Set whether the episode has terminated or not
+        done = self.step_counter >= self.opts["num_frame"]  # Set whether the episode has terminated or not
         # Set any additional information, the info can be used to calculate reward outside gym env
         info = {"pedestrian_gts": copy.deepcopy(self.pedestrian_gts)}
 
@@ -453,11 +450,17 @@ class CarlaMultiCameraEnv(gym.Env):
 
             # x_min, y_min, x_min, x_max = float(x_min), float(y_min), float(x_max), float(y_max)
             # Add the object to the frame (ensure it is inside the image)
+            # if (
+            #         x_min > 1
+            #         and x_max < float(self.opts["cam_x"]) - 2
+            #         and y_min > 1
+            #         and y_max < float(self.opts["cam_y"]) - 2
+            # ):
             if (
-                x_min > 1
-                and x_max < float(self.opts["cam_x"]) - 2
-                and y_min > 1
-                and y_max < float(self.opts["cam_y"]) - 2
+                    x_max > 100
+                    or x_min < float(self.opts["cam_x"]) - 100
+                    or y_max > 100
+                    or y_min < float(self.opts["cam_y"]) - 100
             ):
                 pedestrian_view.append(
                     {
@@ -574,9 +577,10 @@ def get_camera_config(camera):
 
 if __name__ == '__main__':
     import json
+
     with open('cfg/RL/2.cfg', "r") as fp:
         dataset_config = json.load(fp)
-    
+
     env = CarlaMultiCameraEnv(dataset_config)
     observation, info = env.reset()
     done = False

@@ -125,22 +125,22 @@ class frameDataset(VisionDataset):
                     frame = int(fname.split('.')[0])
                     with open(os.path.join(self.root, 'annotations_positions', fname)) as json_file:
                         all_pedestrians = json.load(json_file)
-                    for single_pedestrian in all_pedestrians:
+                    for pedestrian in all_pedestrians:
                         def is_in_cam(cam, grid_x, grid_y):
-                            visible = not (single_pedestrian['views'][cam]['xmin'] == -1 and
-                                        single_pedestrian['views'][cam]['xmax'] == -1 and
-                                        single_pedestrian['views'][cam]['ymin'] == -1 and
-                                        single_pedestrian['views'][cam]['ymax'] == -1)
-                            in_view = (single_pedestrian['views'][cam]['xmin'] > 0 and
-                                    single_pedestrian['views'][cam]['xmax'] < 1920 and
-                                    single_pedestrian['views'][cam]['ymin'] > 0 and
-                                    single_pedestrian['views'][cam]['ymax'] < 1080)
+                            visible = not (pedestrian['views'][cam]['xmin'] == -1 and
+                                           pedestrian['views'][cam]['xmax'] == -1 and
+                                           pedestrian['views'][cam]['ymin'] == -1 and
+                                           pedestrian['views'][cam]['ymax'] == -1)
+                            in_view = (pedestrian['views'][cam]['xmin'] > 0 and
+                                       pedestrian['views'][cam]['xmax'] < 1920 and
+                                       pedestrian['views'][cam]['ymin'] > 0 and
+                                       pedestrian['views'][cam]['ymax'] < 1080)
 
                             # Rgrid_x, Rgrid_y = grid_x // self.world_reduce, grid_y // self.world_reduce
                             # in_map = Rgrid_x < self.Rworld_shape[0] and Rgrid_y < self.Rworld_shape[1]
                             return visible and in_view
 
-                        grid_x, grid_y = self.base.get_worldgrid_from_pos(single_pedestrian['positionID']).squeeze()
+                        grid_x, grid_y = self.base.get_worldgrid_from_pos(pedestrian['positionID']).squeeze()
                         for cam in range(self.num_cam):
                             if is_in_cam(cam, grid_x, grid_y):
                                 og_gt[cam].append(np.array([frame, grid_x, grid_y]))
@@ -208,13 +208,13 @@ class frameDataset(VisionDataset):
         img_bboxs, img_pids = [[] for _ in range(self.num_cam)], [[] for _ in range(self.num_cam)]
         for pedestrian in all_pedestrians:
             # world_pts.append([pedestrian["x"], pedestrian["y"], pedestrian["z"]])
-            world_pts.append(self.base.get_worldgrid_from_worldcoord(np.array([pedestrian["x"], pedestrian["y"]])[:, None])[:, 0])
+            world_pts.append(self.base.get_worldgrid_from_worldcoord(
+                np.array([pedestrian["x"], pedestrian["y"]])[:, None])[:, 0])
             world_lwh.append([pedestrian["l"], pedestrian["w"], pedestrian["h"]])
             world_pids.append(pedestrian["id"])
             for cam in range(self.num_cam):
                 if itemgetter('xmin', 'ymin', 'xmax', 'ymax')(pedestrian['views'][cam]) != (-1, -1, -1, -1):
-                    img_bboxs[cam].append(itemgetter('xmin', 'ymin', 'xmax', 'ymax')
-                                            (pedestrian['views'][cam]))
+                    img_bboxs[cam].append(itemgetter('xmin', 'ymin', 'xmax', 'ymax')(pedestrian['views'][cam]))
                     img_pids[cam].append(pedestrian["id"])
         for cam in range(self.num_cam):
             img_bboxs[cam], img_pids[cam] = np.array(img_bboxs[cam]), np.array(img_pids[cam])
@@ -275,7 +275,7 @@ class frameDataset(VisionDataset):
             frame = self.frames[index]
             imgs = observation["images"]
             world_pts, world_lwh, world_pids, img_bboxs, img_pids = self.get_carla_gt_targets(info["pedestrian_gts"])
-            world_pt_s, world_pid_s  = world_pts[:, :2], world_pids
+            world_pt_s, world_pid_s = world_pts[:, :2], world_pids
 
             # record world gt
             if frame not in self.world_gt:
@@ -290,7 +290,7 @@ class frameDataset(VisionDataset):
 
     def step(self, action):
         pass
-    
+
     def prepare_gt(self, frame, imgs, world_pt_s, world_pid_s, img_bboxs, img_pids, visualize=False):
         def plt_visualize():
             import cv2
@@ -323,10 +323,14 @@ class frameDataset(VisionDataset):
             img_w_s, img_h_s = (cam_img_bboxs[:, 2] - cam_img_bboxs[:, 0]), (cam_img_bboxs[:, 3] - cam_img_bboxs[:, 1])
 
             img_gt = get_centernet_gt(self.Rimg_shape, img_x_s, img_y_s, cam_img_pids, img_w_s, img_h_s,
-                            reduce=self.img_reduce, top_k=self.top_k, kernel_size=self.img_kernel_size)
+                                      reduce=self.img_reduce, top_k=self.top_k, kernel_size=self.img_kernel_size)
             aug_imgs_gt.append(img_gt)
             if visualize:
                 plt_visualize()
+
+        # TODO: check the difference between different dataloader iteration
+        if frame == 0:
+            plt_visualize()
 
         aug_imgs = torch.stack(aug_imgs)
         aug_mats = torch.stack(aug_mats)
@@ -343,12 +347,11 @@ class frameDataset(VisionDataset):
                     aug_imgs_gt[key][cam] = 0
         # world gt
         world_gt = get_centernet_gt(self.Rworld_shape, world_pt_s[:, 0], world_pt_s[:, 1], world_pid_s,
-                          reduce=self.world_reduce, top_k=self.top_k, kernel_size=self.world_kernel_size)
+                                    reduce=self.world_reduce, top_k=self.top_k, kernel_size=self.world_kernel_size)
         return aug_imgs, world_gt, aug_imgs_gt, aug_mats, frame, keep_cams
 
     def __len__(self):
         return len(self.frames)
-
 
 
 if __name__ == '__main__':
@@ -360,6 +363,7 @@ if __name__ == '__main__':
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), force_download=True)
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
     import json
+
     with open('./cfg/RL/1.cfg', "r") as fp:
         dataset_config = json.load(fp)
     dataset = frameDataset(CarlaX(dataset_config), split_ratio=(0.01, 0.1, 0.1))
@@ -386,6 +390,7 @@ if __name__ == '__main__':
     if False:
         import matplotlib.pyplot as plt
         from src.utils.projection import get_worldcoord_from_imagecoord
+
         world_grid_maps = []
         xx, yy = np.meshgrid(np.arange(0, 1920, 20), np.arange(0, 1080, 20))
         H, W = xx.shape
@@ -413,4 +418,3 @@ if __name__ == '__main__':
         plt.imshow(np.sum(np.stack(world_grid_maps), axis=0))
         plt.show()
         pass
-
