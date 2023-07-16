@@ -202,7 +202,8 @@ def render_pointcloud_mv_img(points, num_cam, renderer, cameras, lights, device=
     #  x, y, z, nx, ny, nz, r, g, b, label, nyu_label
     point_cloud = Pointclouds(points=[torch.tensor(points[:, :3], dtype=torch.float32, device=device)],
                               normals=[torch.tensor(points[:, 3:6], dtype=torch.float32, device=device)],
-                              features=[torch.tensor(points[:, 6:9], dtype=torch.float32, device=device) / 256]).extend(num_cam)
+                              features=[torch.tensor(points[:, 6:9], dtype=torch.float32, device=device) / 256]
+                              ).extend(num_cam)
     images = renderer(point_cloud)
     return images
 

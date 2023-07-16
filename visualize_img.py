@@ -27,7 +27,7 @@ if __name__ == '__main__':
     for i in range(30):
         # index=np.random.randint(len(dataset))
         index = i
-        imgs, tgt, keep_cams = dataset[index+100]
+        imgs, tgt, keep_cams = dataset[index + 100]
         imgs = denorm(imgs)
         # imgs[0] = set_border(imgs[0])  # , fill=(255, 192, 0)
         # imgs[9] = set_border(imgs[9])  # , fill=(0, 176, 80)

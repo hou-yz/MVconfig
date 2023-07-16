@@ -265,8 +265,11 @@ class PerspectiveTrainer(BaseTrainer):
 
         if init_cam is not None:
             print('*************************************')
-            print(f'MVSelect average moda {modas.mean():.1f}±{modas.std():.1f}%, modp {modps.mean():.1f}±{modps.std():.1f}%, '
-                  f'prec {precs.mean():.1f}±{precs.std():.1f}%, recall {recalls.mean():.1f}±{recalls.std():.1f}%, time: {time.time() - t0:.1f}')
+            print(f'MVSelect average moda {modas.mean():.1f}±{modas.std():.1f}%, '
+                  f'modp {modps.mean():.1f}±{modps.std():.1f}%, '
+                  f'prec {precs.mean():.1f}±{precs.std():.1f}%, '
+                  f'recall {recalls.mean():.1f}±{recalls.std():.1f}%, '
+                  f'time: {time.time() - t0:.1f}')
             print('*************************************')
         return losses.mean() / len(dataloader), [modas.mean(), modps.mean(), precs.mean(), recalls.mean(), ]
 

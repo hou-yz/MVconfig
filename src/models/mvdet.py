@@ -176,7 +176,6 @@ class MVDet(MultiviewBase):
         return world_heatmap, world_offset
 
 
-
 if __name__ == '__main__':
     from src.datasets.frameDataset import frameDataset
     from src.datasets.wildtrack import Wildtrack

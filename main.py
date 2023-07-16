@@ -71,7 +71,7 @@ def main(args):
         train_set = ModelNet40(fpath, num_cam, split='train', )
         val_set = ModelNet40(fpath, num_cam, split='train', per_cls_instances=25)
         test_set = ModelNet40(fpath, num_cam, split='test', )
-    elif args.dataset=='scanobjectnn':
+    elif args.dataset == 'scanobjectnn':
         fpath = os.path.expanduser('~/Data/ScanObjectNN')
 
         args.task = 'mvcnn'
