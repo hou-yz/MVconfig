@@ -13,6 +13,7 @@ def main():
     config = {
         "map": "Town04",
         "num_cam": 4,
+        "num_frame": 400,
         "map_expand": 40,
         "cam_x": 1920,
         "cam_y": 1080,
@@ -31,7 +32,6 @@ def main():
         ],
         "spawn_count": 25,
         "spawn_area": (191.5, 211.5, -256.85, -236.85, 2, 3),
-        "num_frame": 4,
         "env_action_space": "pitch-yaw",
     }
     with open(os.path.join(cfg_path, "1.cfg"), "w") as fp:

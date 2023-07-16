@@ -12,7 +12,7 @@ from pathlib import Path
 import json
 import numpy as np
 
-from CarlaX.utils.util import pflat
+from .utils import pflat
 
 
 # def build_camera_matrices(folder: Path, output_K=False):

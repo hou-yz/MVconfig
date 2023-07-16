@@ -12,7 +12,7 @@ from gym import spaces
 import numpy as np
 import matplotlib.pyplot as plt
 
-from .unitConversion import get_pos_from_worldcoord
+# from .unitConversion import get_pos_from_worldcoord
 from .cameras import build_cam
 from .utils import loc_dist, pflat, get_origin
 
@@ -145,7 +145,7 @@ class CarlaMultiCameraEnv(gym.Env):
         self.client.set_timeout(10.0)
         self.world = self.client.load_world(self.opts["map"])
 
-        self.origin = get_origin(self.opts)
+        # self.origin = get_origin(self.opts)
         # CarlaX is xy indexing; x,y (w,h) (n_col,n_row)
         x_min, x_max, _, _, _, _ = opts["spawn_area"]
         self.map_width = x_max - x_min
@@ -185,7 +185,8 @@ class CarlaMultiCameraEnv(gym.Env):
 
         # world actors
         self.camera_configs = {}
-        self.camera_mats = {}
+        self.camera_intrinsics = {}
+        self.camera_extrinsics = {}
         self.cameras = {}
         self.img_cam_buffer = {}
         self.pedestrians = []
@@ -212,63 +213,6 @@ class CarlaMultiCameraEnv(gym.Env):
         act = np.concatenate([default_location, default_rotation, default_fov[:, None]], axis=1)
         return act
     
-    def get_pedestrian_views(self, actor):
-        bbox = actor.bounding_box
-        verts = bbox.get_world_vertices(actor.get_transform())
-
-        # prepare 2D bbox
-        pedestrian_view = []
-        # add all cameras to the views attribute
-        for id in self.cameras.keys():
-            verts = [v for v in bbox.get_world_vertices(actor.get_transform())]
-            x_max = -10000
-            x_min = 10000
-            y_max = -10000
-            y_min = 10000
-            for vert in verts:
-                # convert vert to homogeneous coordinate, vert is a carla.Location
-                vert_homo = np.array([vert.x, vert.y, vert.z, 1])
-                p_homo = self.camera_mats[id] @ vert_homo
-                p = pflat(p_homo)
-                if p[0] > x_max:
-                    x_max = p[0]
-                if p[0] < x_min:
-                    x_min = p[0]
-                if p[1] > y_max:
-                    y_max = p[1]
-                if p[1] < y_min:
-                    y_min = p[1]
-
-            # x_min, y_min, x_min, x_max = float(x_min), float(y_min), float(x_max), float(y_max)
-            # Add the object to the frame (ensure it is inside the image)
-            if (
-                x_min > 1
-                and x_max < float(self.opts["cam_x"]) - 2
-                and y_min > 1
-                and y_max < float(self.opts["cam_y"]) - 2
-            ):
-                pedestrian_view.append(
-                    {
-                        "viewNum": id,
-                        "xmin": x_min,
-                        "ymin": y_min,
-                        "xmax": x_max,
-                        "ymax": y_max,
-                    }
-                )
-            else:
-                # same as the convention (MultiviewX), feed invalid value (-1) if bbox outside picture
-                pedestrian_view.append(
-                    {
-                        "viewNum": id,
-                        "xmin": -1,
-                        "ymin": -1,
-                        "xmax": -1,
-                        "ymax": -1,
-                    }
-                )
-        return pedestrian_view
-
     def reset(self, seed=None):
         # if a new seed is provided, set generator to used new seed
         # otherwise use old seed
@@ -324,9 +268,10 @@ class CarlaMultiCameraEnv(gym.Env):
 
         # update camera mats
         for cam, camera in self.cameras.items():
-            cam_config, proj_mat = get_camera_config(camera)
+            cam_config, intrinsic, extrinsic = get_camera_config(camera)
             self.camera_configs[cam] = cam_config
-            self.camera_mats[cam] = proj_mat
+            self.camera_intrinsics[cam] = intrinsic
+            self.camera_extrinsics[cam] = extrinsic
 
         # update pedestrian bbox from each camera view
         for i, pedestrian in enumerate(self.pedestrians):
@@ -452,8 +397,8 @@ class CarlaMultiCameraEnv(gym.Env):
             rot = actor.get_transform().rotation
             forward = rot.get_forward_vector()
 
-            ped_worldcoord = [loc.x, loc.y]
-            ped_pos = int(get_pos_from_worldcoord(ped_worldcoord, *self.origin, self.map_width, self.opts["map_expand"]))
+            # ped_worldcoord = [loc.x, loc.y]
+            # ped_pos = int(get_pos_from_worldcoord(ped_worldcoord, *self.origin, self.map_width, self.opts["map_expand"]))
 
             self.pedestrian_gts.append(
                 {
@@ -473,18 +418,76 @@ class CarlaMultiCameraEnv(gym.Env):
                     "forward_x": forward.x,
                     "forward_y": forward.y,
                     "forward_z": forward.z,
-                    "positionID": ped_pos,
+                    # "positionID": ped_pos,
                     "views": self.get_pedestrian_views(actor),
                 }
             )
         print(f"Collected {len(self.pedestrian_gts)} pedestrian information")
+
+    def get_pedestrian_views(self, actor):
+        bbox = actor.bounding_box
+        verts = bbox.get_world_vertices(actor.get_transform())
+
+        # prepare 2D bbox
+        pedestrian_view = []
+        # add all cameras to the views attribute
+        for id in self.cameras.keys():
+            verts = [v for v in bbox.get_world_vertices(actor.get_transform())]
+            x_max = -10000
+            x_min = 10000
+            y_max = -10000
+            y_min = 10000
+            for vert in verts:
+                # convert vert to homogeneous coordinate, vert is a carla.Location
+                vert_homo = np.array([vert.x, vert.y, vert.z, 1])
+                p_homo = self.camera_intrinsics[id] @ self.camera_extrinsics[id] @ vert_homo
+                p = pflat(p_homo)
+                if p[0] > x_max:
+                    x_max = p[0]
+                if p[0] < x_min:
+                    x_min = p[0]
+                if p[1] > y_max:
+                    y_max = p[1]
+                if p[1] < y_min:
+                    y_min = p[1]
+
+            # x_min, y_min, x_min, x_max = float(x_min), float(y_min), float(x_max), float(y_max)
+            # Add the object to the frame (ensure it is inside the image)
+            if (
+                x_min > 1
+                and x_max < float(self.opts["cam_x"]) - 2
+                and y_min > 1
+                and y_max < float(self.opts["cam_y"]) - 2
+            ):
+                pedestrian_view.append(
+                    {
+                        "viewNum": id,
+                        "xmin": x_min,
+                        "ymin": y_min,
+                        "xmax": x_max,
+                        "ymax": y_max,
+                    }
+                )
+            else:
+                # same as the convention (MultiviewX), feed invalid value (-1) if bbox outside picture
+                pedestrian_view.append(
+                    {
+                        "viewNum": id,
+                        "xmin": -1,
+                        "ymin": -1,
+                        "xmax": -1,
+                        "ymax": -1,
+                    }
+                )
+        return pedestrian_view
 
     def reset_cameras(self, location=None, rotation=None):
         # destroy existing cameras
         for camera in self.cameras.values():
             camera.destroy()
         self.camera_configs = {}
-        self.camera_mats = {}
+        self.camera_intrinsics = {}
+        self.camera_extrinsics = {}
         self.cameras = {}
         self.img_cam_buffer = {}
 
@@ -513,9 +516,10 @@ class CarlaMultiCameraEnv(gym.Env):
         for cam, camera in self.cameras.items():
             # save camera configs, rather than projection matrices
             # projection/intrinsic/extrinsic matrices can be built from configs
-            cam_config, proj_mat = get_camera_config(camera)
+            cam_config, intrinsic, extrinsic = get_camera_config(camera)
             self.camera_configs[cam] = cam_config
-            self.camera_mats[cam] = proj_mat
+            self.camera_intrinsics[cam] = intrinsic
+            self.camera_extrinsics[cam] = extrinsic
             self.img_cam_buffer[cam] = Queue(maxsize=0)
 
 
@@ -564,8 +568,8 @@ def get_camera_config(camera):
         "fov": fov,
     }
 
-    proj_mat, _, _ = build_cam(**cam_value)
-    return cam_config, proj_mat
+    _, intrinsic, extrinsic = build_cam(**cam_value)
+    return cam_config, intrinsic, extrinsic
 
 
 if __name__ == '__main__':
