@@ -43,14 +43,14 @@ class MultiviewX(VisionDataset):
         return grid_x + grid_y * 1000
 
     def get_worldgrid_from_worldcoord(self, world_coord):
-        # datasets default unit: centimeter & origin: (-300,-900)
+        # datasets default unit: meter; origin: (0,0)
         coord_x, coord_y = world_coord[0, :], world_coord[1, :]
         grid_x = coord_x * 40
         grid_y = coord_y * 40
         return np.array([[grid_x], [grid_y]], dtype=int).reshape([2, -1])
 
     def get_worldcoord_from_worldgrid(self, worldgrid):
-        # datasets default unit: centimeter & origin: (-300,-900)
+        # datasets default unit: meter; origin: (0,0)
         grid_x, grid_y = worldgrid[0, :], worldgrid[1, :]
         coord_x = grid_x / 40
         coord_y = grid_y / 40
