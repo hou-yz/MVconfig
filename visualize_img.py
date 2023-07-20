@@ -20,7 +20,7 @@ def set_border(img, width=5, fill=(0, 255, 0)):
 if __name__ == '__main__':
     denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='test', )
-    # imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = dataset[0]
+    # imgs, world_gt, imgs_gt, aug_mats, frame, keep_cams = dataset[0]
 
     # dataset = imgDataset(os.path.expanduser('~/Data/modelnet/modelnet40v1png'), 12, split='test')
     dataset = ModelNet40(os.path.expanduser('~/Data/modelnet/modelnet40v2png_ori4'), 20, split='test')

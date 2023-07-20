@@ -168,7 +168,7 @@ if __name__ == '__main__':
 
     dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='test')
     dataloader = DataLoader(dataset, 1, num_workers=0)
-    imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
+    imgs, world_gt, imgs_gt, aug_mats, frame, keep_cams = next(iter(dataloader))
 
     torch.backends.cudnn.benchmark = False
     model = MVDet(dataset).cuda()
