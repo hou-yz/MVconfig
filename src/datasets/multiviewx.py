@@ -24,9 +24,6 @@ class MultiviewX(VisionDataset):
         self.indexing = 'xy'
         self.world_indexing_from_xy_mat = np.eye(3)
         self.world_indexing_from_ij_mat = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])
-        # image is in xy indexing by default
-        self.img_xy_from_xy_mat = np.eye(3)
-        self.img_xy_from_ij_mat = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])
         # unit in meters
         self.worldcoord_unit = 1
         self.worldcoord_from_worldgrid_mat = np.array([[0.025, 0, 0], [0, 0.025, 0], [0, 0, 1]])

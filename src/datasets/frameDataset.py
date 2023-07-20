@@ -110,11 +110,12 @@ class frameDataset(VisionDataset):
             self.world_gt = {}
         else:
             # get camera matrices
-            self.world_from_img, self.img_from_world = self.get_world_imgs_trans()
+            self.proj_mats = self.get_world_imgs_trans()
             # get image & world coverage masks
             world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
-            self.imgs_region = warp_perspective(world_masks, self.img_from_world, self.img_shape, 'nearest')
-            self.Rworld_coverage = self.get_world_coverage().bool()
+            self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')
+            img_masks = torch.ones([self.num_cam, 1, self.base.img_shape[0], self.base.img_shape[1]])
+            self.Rworld_coverage = warp_perspective(img_masks, self.proj_mats, self.Rworld_shape)
 
             self.img_fpaths = self.get_image_fpaths(frame_range)
             self.world_gt, self.imgs_gt, self.pid_dict, self.frames = self.get_gt_targets(
@@ -220,45 +221,24 @@ class frameDataset(VisionDataset):
             img_bboxs[cam], img_pids[cam] = np.array(img_bboxs[cam]), np.array(img_pids[cam])
         return np.array(world_pts), np.array(world_lwh), np.array(world_pids), img_bboxs, img_pids
 
-    def get_world_coverage(self):
-        # world grid change to xy indexing
-        world_zoom_mat = np.diag([self.world_reduce, self.world_reduce, 1])
-        Rworldgrid_from_worldcoord_mat = np.linalg.inv(
-            self.base.worldcoord_from_worldgrid_mat @ world_zoom_mat @ self.base.world_indexing_from_xy_mat)
-
-        # z in meters by default
-        # projection matrices: img feat -> world feat
-        worldcoord_from_imgcoord_mats = [get_worldcoord_from_imgcoord_mat(self.base.intrinsic_matrices[cam],
-                                                                          self.base.extrinsic_matrices[cam], )
-                                         for cam in range(self.num_cam)]
-        # Rworldgrid(xy)_from_imgcoord(xy)
-        proj_mats = torch.stack([torch.from_numpy(Rworldgrid_from_worldcoord_mat @
-                                                  worldcoord_from_imgcoord_mats[cam])
-                                 for cam in range(self.num_cam)]).float()
-
-        imgs = torch.ones([self.num_cam, 1, self.base.img_shape[0], self.base.img_shape[1]])
-        coverage = warp_perspective(imgs, proj_mats, self.Rworld_shape)
-        return coverage
-
     def get_world_imgs_trans(self, z=0):
-        # image and world feature maps from xy indexing, change them into world indexing / xy indexing (img)
-        # world grid change to xy indexing
-        Rworldgrid_from_worldcoord_mat = np.linalg.inv(self.base.worldcoord_from_worldgrid_mat @
-                                                       self.base.world_indexing_from_xy_mat)
+        # image and world feature maps from xy indexing, change them into world (xy/ij) indexing / image (xy) indexing
+        world_zoom_mat = np.diag([1 / self.world_reduce, 1 / self.world_reduce, 1])
+        Rworldgrid_from_worldcoord = world_zoom_mat @ \
+                                     self.base.world_indexing_from_xy_mat @ \
+                                     np.linalg.inv(self.base.worldcoord_from_worldgrid_mat)
 
         # z in meters by default
         # projection matrices: img feat -> world feat
-        worldcoord_from_imgcoord_mats = [get_worldcoord_from_imgcoord_mat(self.base.intrinsic_matrices[cam],
-                                                                          self.base.extrinsic_matrices[cam],
-                                                                          z / self.base.worldcoord_unit)
-                                         for cam in range(self.num_cam)]
+        worldcoord_from_imgcoord = [get_worldcoord_from_imgcoord_mat(self.base.intrinsic_matrices[cam],
+                                                                     self.base.extrinsic_matrices[cam],
+                                                                     z / self.base.worldcoord_unit)
+                                    for cam in range(self.num_cam)]
         # worldgrid(xy)_from_img(xy)
-        proj_mats = [Rworldgrid_from_worldcoord_mat @ worldcoord_from_imgcoord_mats[cam] @ self.base.img_xy_from_xy_mat
-                     for cam in range(self.num_cam)]
-        world_from_img = torch.tensor(np.stack(proj_mats))
-        # img(xy)_from_worldgrid(xy)
-        img_from_world = torch.tensor(np.stack([np.linalg.inv(proj_mat) for proj_mat in proj_mats]))
-        return world_from_img.float(), img_from_world.float()
+        Rworldgrid_from_imgcoord = torch.stack([torch.from_numpy(Rworldgrid_from_worldcoord @
+                                                                 worldcoord_from_imgcoord[cam]).float()
+                                                for cam in range(self.num_cam)])
+        return Rworldgrid_from_imgcoord
 
     def __getitem__(self, index, visualize=False):
         frame = self.frames[index]
@@ -266,11 +246,12 @@ class frameDataset(VisionDataset):
             observation, info = self.base.env.reset(seed=self.fixed_seeds[index])
             self.base.intrinsic_matrices, self.base.extrinsic_matrices = self.base.env.camera_intrinsics, self.base.env.camera_extrinsics
             # get camera matrices
-            self.world_from_img, self.img_from_world = self.get_world_imgs_trans()
+            self.proj_mats = self.get_world_imgs_trans()
             # get image & world coverage masks
             world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
-            self.imgs_region = warp_perspective(world_masks, self.img_from_world, self.img_shape, 'nearest')
-            self.Rworld_coverage = self.get_world_coverage().bool()
+            self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')
+            img_masks = torch.ones([self.num_cam, 1, self.base.img_shape[0], self.base.img_shape[1]])
+            self.Rworld_coverage = warp_perspective(img_masks, self.proj_mats, self.Rworld_shape)
 
             frame = self.frames[index]
             imgs = observation["images"]
@@ -284,12 +265,27 @@ class frameDataset(VisionDataset):
                 assert (self.world_gt[frame][0] == world_pt_s).all()
         else:
             imgs = [np.array(Image.open(self.img_fpaths[cam][frame]).convert('RGB')) for cam in range(self.num_cam)]
-            img_bboxs, img_pids = zip(*self.imgs_gt[frame])
+            img_bboxs, img_pids = zip(*self.imgs_gt[frame].values())
             world_pt_s, world_pid_s = self.world_gt[frame]
-        return self.prepare_gt(frame, imgs, world_pt_s, world_pid_s, img_bboxs, img_pids, visualize=visualize)
+        return self.prepare_gt(frame, imgs, world_pt_s, world_pid_s, img_bboxs, img_pids,
+                               visualize=visualize), self.proj_mats
 
     def step(self, action):
-        pass
+        observation, reward, done, info = self.base.env.step(action)
+
+        # get camera matrices
+        self.base.intrinsic_matrices, self.base.extrinsic_matrices = self.base.env.camera_intrinsics, self.base.env.camera_extrinsics
+        self.proj_mats = self.get_world_imgs_trans()
+        # get image & world coverage masks
+        world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
+        self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')
+        img_masks = torch.ones([self.num_cam, 1, self.base.img_shape[0], self.base.img_shape[1]])
+        self.Rworld_coverage = warp_perspective(img_masks, self.proj_mats, self.Rworld_shape)
+
+        imgs = observation["images"]
+        world_pts, world_lwh, world_pids, img_bboxs, img_pids = self.get_carla_gt_targets(info["pedestrian_gts"])
+        world_pt_s, world_pid_s = world_pts[:, :2], world_pids
+        return self.prepare_gt(frame, imgs, world_pt_s, world_pid_s, img_bboxs, img_pids), self.proj_mats, done
 
     def prepare_gt(self, frame, imgs, world_pt_s, world_pid_s, img_bboxs, img_pids, visualize=False):
         def plt_visualize():
@@ -313,6 +309,8 @@ class frameDataset(VisionDataset):
         for cam in range(self.num_cam):
             img = imgs[cam]
             cam_img_bboxs, cam_img_pids = img_bboxs[cam], img_pids[cam]
+            if len(cam_img_bboxs.shape) == 1:
+                cam_img_bboxs = cam_img_bboxs.reshape([-1, 4])
             if self.augmentation:
                 img, cam_img_bboxs, cam_img_pids, M = random_affine(img, cam_img_bboxs, cam_img_pids)
             else:
@@ -325,17 +323,14 @@ class frameDataset(VisionDataset):
             img_gt = get_centernet_gt(self.Rimg_shape, img_x_s, img_y_s, cam_img_pids, img_w_s, img_h_s,
                                       reduce=self.img_reduce, top_k=self.top_k, kernel_size=self.img_kernel_size)
             aug_imgs_gt.append(img_gt)
+            # TODO: check the difference between different dataloader iteration
             if visualize:
                 plt_visualize()
-
-        # TODO: check the difference between different dataloader iteration
-        if frame == 0:
-            plt_visualize()
 
         aug_imgs = torch.stack(aug_imgs)
         aug_mats = torch.stack(aug_mats)
         # inverse_M = torch.inverse(
-        #     torch.cat([affine_mats, torch.tensor([0, 0, 1]).view(1, 1, 3).repeat(self.num_cam, 1, 1)], dim=1))[:, :2]
+        #     torch.cat([aug_mats, torch.tensor([0, 0, 1]).view(1, 1, 3).repeat(self.num_cam, 1, 1)], dim=1))[:, :2]
         aug_imgs_gt = {key: torch.stack([img_gt[key] for img_gt in aug_imgs_gt]) for key in aug_imgs_gt[0]}
         drop, keep_cams = np.random.rand() < self.dropout, torch.ones(self.num_cam, dtype=torch.bool)
         if drop:
@@ -361,12 +356,12 @@ if __name__ == '__main__':
     from src.datasets.carlax import CarlaX
 
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), force_download=True)
-    # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
-    import json
-
-    with open('./cfg/RL/1.cfg', "r") as fp:
-        dataset_config = json.load(fp)
-    dataset = frameDataset(CarlaX(dataset_config), split_ratio=(0.01, 0.1, 0.1))
+    dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
+    # import json
+    #
+    # with open('./cfg/RL/1.cfg', "r") as fp:
+    #     dataset_config = json.load(fp)
+    # dataset = frameDataset(CarlaX(dataset_config), split_ratio=(0.01, 0.1, 0.1))
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', semi_supervised=.1)
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train', semi_supervised=.1)
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', semi_supervised=0.5)
@@ -382,8 +377,14 @@ if __name__ == '__main__':
     dataloader = DataLoader(dataset, 2, True, num_workers=0)
     # imgs, world_gt, imgs_gt, M, frame, keep_cams = next(iter(dataloader))
     t0 = time.time()
-    for i in range(20):
-        imgs, world_gt, imgs_gt, M, frame, keep_cams = dataset.__getitem__(i % len(dataset), visualize=False)
+    for i in range(2):
+        (imgs, world_gt, imgs_gt, M, frame, keep_cams), proj_mats = dataset.__getitem__(i % len(dataset),
+                                                                                        visualize=False)
+        if dataset.base.__name__ == 'CarlaX':
+            done = False
+            while not done:
+                (imgs, world_gt, imgs_gt, M, frame, keep_cams), proj_mats, done = dataset.step(
+                    np.random.rand(dataset.num_cam, 7))
     print(time.time() - t0)
 
     pass

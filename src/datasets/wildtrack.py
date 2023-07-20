@@ -24,9 +24,6 @@ class Wildtrack(VisionDataset):
         self.indexing = 'ij'
         self.world_indexing_from_xy_mat = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])
         self.world_indexing_from_ij_mat = np.eye(3)
-        # image is in xy indexing by default
-        self.img_xy_from_xy_mat = np.eye(3)
-        self.img_xy_from_ij_mat = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])
         # unit in meters
         self.worldcoord_unit = 0.01
         self.worldcoord_from_worldgrid_mat = np.array([[2.5, 0, -300], [0, 2.5, -900], [0, 0, 1]])
