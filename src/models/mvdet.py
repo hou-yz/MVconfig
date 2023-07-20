@@ -37,22 +37,6 @@ class MVDet(MultiviewBase):
         self.Rimg_shape, self.Rworld_shape = np.array(dataset.Rimg_shape), np.array(dataset.Rworld_shape)
         self.img_reduce = dataset.img_reduce
 
-        # world grid change to xy indexing
-        world_zoom_mat = np.diag([dataset.world_reduce, dataset.world_reduce, 1])
-        Rworldgrid_from_worldcoord_mat = np.linalg.inv(
-            dataset.base.worldcoord_from_worldgrid_mat @ world_zoom_mat @ dataset.base.world_indexing_from_xy_mat)
-
-        # z in meters by default
-        # projection matrices: img feat -> world feat
-        worldcoord_from_imgcoord_mats = [get_worldcoord_from_imgcoord_mat(dataset.base.intrinsic_matrices[cam],
-                                                                          dataset.base.extrinsic_matrices[cam],
-                                                                          z / dataset.base.worldcoord_unit)
-                                         for cam in range(dataset.num_cam)]
-        # Rworldgrid(xy)_from_imgcoord(xy)
-        self.proj_mats = torch.stack([torch.from_numpy(Rworldgrid_from_worldcoord_mat @
-                                                       worldcoord_from_imgcoord_mats[cam])
-                                      for cam in range(dataset.num_cam)]).float()
-
         if arch == 'resnet18':
             self.base = nn.Sequential(*list(resnet18(pretrained=True,
                                                      replace_stride_with_dilation=[False, True, True]).children())[:-2])
@@ -98,19 +82,19 @@ class MVDet(MultiviewBase):
         fill_fc_weights(self.world_offset)
         pass
 
-    def get_feat(self, imgs, M, down=1, visualize=False):
+    def get_feat(self, imgs, M, proj_mats, down=1, visualize=False):
         B, N, _, H, W = imgs.shape
         imgs = F.interpolate(imgs.flatten(0, 1), scale_factor=1 / down)
 
-        inverse_affine_mats = torch.inverse(M.view([B * N, 3, 3]))
+        inverse_aug_mats = torch.inverse(M.view([B * N, 3, 3]))
         # image and world feature maps from xy indexing, change them into world indexing / xy indexing (img)
-        imgcoord_from_Rimggrid_mat = inverse_affine_mats @ \
+        imgcoord_from_Rimggrid_mat = inverse_aug_mats @ \
                                      torch.diag(torch.tensor([self.img_reduce * down, self.img_reduce * down, 1])
                                                 ).unsqueeze(0).repeat(B * N, 1, 1).float()
         # Rworldgrid(xy)_from_Rimggrid(xy)
         # proj_mats = torch.diag(torch.tensor([1 / down, 1 / down, 1])).unsqueeze(0).repeat(B * N, 1, 1).float() @ \
         #             self.proj_mats.unsqueeze(0).repeat(B, 1, 1, 1).flatten(0, 1) @ imgcoord_from_Rimggrid_mat
-        proj_mats = self.proj_mats[:N].unsqueeze(0).repeat(B, 1, 1, 1).flatten(0, 1) @ imgcoord_from_Rimggrid_mat
+        proj_mats = proj_mats[:, :N].flatten(0, 1) @ imgcoord_from_Rimggrid_mat
 
         if visualize:
             denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
@@ -185,17 +169,17 @@ if __name__ == '__main__':
     from src.utils.decode import ctdet_decode
     from thop import profile
 
-    dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train', augmentation=True)
-    dataloader = DataLoader(dataset, 1, False, num_workers=0)
+    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', augmentation=True)
+    dataloader = DataLoader(dataset, 2, False, num_workers=0)
 
     model = MVDet(dataset).cuda()
-    imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
+    (imgs, world_gt, imgs_gt, aug_mats, frame, keep_cams), proj_mats = next(iter(dataloader))
     keep_cams[0, 3] = 0
     init_cam = 0
     model.train()
-    (world_heatmap, world_offset), _, cam_train = model(imgs.cuda(), affine_mats, 2, init_cam, 3)
+    (world_heatmap, world_offset), _, cam_train = model(imgs.cuda(), aug_mats, proj_mats, 2, init_cam, 3)
     xysc_train = ctdet_decode(world_heatmap, world_offset)
-    # macs, params = profile(model, inputs=(imgs[:, :3].cuda(), affine_mats[:, :3].contiguous()))
+    # macs, params = profile(model, inputs=(imgs[:, :3].cuda(), aug_mats[:, :3].contiguous()))
     # macs, params = profile(model.select_module, inputs=(torch.randn([1, 128, 160, 250]).cuda(),
     #                                                     F.one_hot(torch.tensor([1]), num_classes=6).cuda()))
     # macs, params = profile(model, inputs=(torch.rand([1, 128, 160, 250]).cuda(),))

@@ -31,7 +31,7 @@ class MVCNN(MultiviewBase):
         self.select_module = CamSelect(dataset.num_cam, base_dim, 1, aggregation)
         pass
 
-    def get_feat(self, imgs, M=None, down=1, visualize=False):
+    def get_feat(self, imgs, M=None, proj_mats=None, down=1, visualize=False):
         B, N, _, H, W = imgs.shape
         imgs = F.interpolate(imgs.flatten(0, 1), scale_factor=1 / down)
         imgs_feat = self.base(imgs)

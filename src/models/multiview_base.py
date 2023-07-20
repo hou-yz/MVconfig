@@ -13,8 +13,8 @@ class MultiviewBase(nn.Module):
         self.aggregation = aggregation
         self.select_module = None
 
-    def forward(self, imgs, M=None, down=1, init_prob=None, steps=0, keep_cams=None, visualize=False):
-        feat, aux_res = self.get_feat(imgs, M, down, visualize)
+    def forward(self, imgs, M=None, proj_mats=None, down=1, init_prob=None, steps=0, keep_cams=None, visualize=False):
+        feat, aux_res = self.get_feat(imgs, M, proj_mats, down, visualize)
         if self.select_module is None or init_prob is None or steps == 0:
             B, N, C, H, W = feat.shape
             if keep_cams is None:
@@ -41,7 +41,7 @@ class MultiviewBase(nn.Module):
         selection_res = (log_probs, values, actions, entropies)
         return overall_feat, selection_res
 
-    def get_feat(self, imgs, M, down=1, visualize=False):
+    def get_feat(self, imgs, M, proj_mats, down=1, visualize=False):
         raise NotImplementedError
 
     def get_output(self, overall_feat, visualize=False):
