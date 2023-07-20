@@ -52,37 +52,30 @@ def main(args):
         torch.backends.cudnn.benchmark = True
 
     # dataset
-    if 'modelnet' in args.dataset:
-        if args.dataset == 'modelnet40_12':
-            fpath = os.path.expanduser('~/Data/modelnet/modelnet40_images_new_12x')
-            num_cam = 12
-        elif args.dataset == 'modelnet40_20':
-            fpath = os.path.expanduser('~/Data/modelnet/modelnet40v2png_ori4')
-            num_cam = 20
-        else:
-            raise Exception
+    if args.dataset == 'carlax':
 
-        args.task = 'mvcnn'
-        result_type = ['prec']
-        args.lr = 5e-5 if args.lr is None else args.lr
+        import json
+
+        with open('./cfg/RL/1.cfg', "r") as fp:
+            dataset_config = json.load(fp)
+        base = CarlaX(dataset_config)
+
+        args.task = 'mvdet'
+        result_type = ['moda', 'modp', 'prec', 'recall']
+        args.lr = 5e-4 if args.lr is None else args.lr
         args.select_lr = 1e-4 if args.select_lr is None else args.select_lr
-        args.batch_size = 8 if args.batch_size is None else args.batch_size
+        args.batch_size = 1 if args.batch_size is None else args.batch_size
 
-        train_set = ModelNet40(fpath, num_cam, split='train', )
-        val_set = ModelNet40(fpath, num_cam, split='train', per_cls_instances=25)
-        test_set = ModelNet40(fpath, num_cam, split='test', )
-    elif args.dataset == 'scanobjectnn':
-        fpath = os.path.expanduser('~/Data/ScanObjectNN')
-
-        args.task = 'mvcnn'
-        result_type = ['prec']
-        args.lr = 5e-5 if args.lr is None else args.lr
-        args.select_lr = 1e-4 if args.select_lr is None else args.select_lr
-        args.batch_size = 8 if args.batch_size is None else args.batch_size
-
-        train_set = ScanObjectNN(fpath, split='train', )
-        val_set = ScanObjectNN(fpath, split='train', per_cls_instances=25)
-        test_set = ScanObjectNN(fpath, split='test', )
+        train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
+                                 img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
+                                 img_kernel_size=args.img_kernel_size,
+                                 dropout=args.dropcam, augmentation=args.augmentation)
+        val_set = frameDataset(base, split='val', world_reduce=args.world_reduce,
+                               img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
+                               img_kernel_size=args.img_kernel_size)
+        test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
+                                img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
+                                img_kernel_size=args.img_kernel_size)
     else:
         if args.dataset == 'wildtrack':
             base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
@@ -146,11 +139,8 @@ def main(args):
     print(vars(args))
 
     # model
-    if args.task == 'mvcnn':
-        model = MVCNN(train_set, args.arch, args.aggregation).cuda()
-    else:
-        model = MVDet(train_set, args.arch, args.aggregation,
-                      args.use_bottleneck, args.hidden_dim, args.outfeat_dim).cuda()
+    model = MVDet(train_set, args.arch, args.aggregation,
+                  args.use_bottleneck, args.hidden_dim, args.outfeat_dim).cuda()
 
     # load checkpoint
     if args.steps:
@@ -189,10 +179,7 @@ def main(args):
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
 
-    if args.task == 'mvcnn':
-        trainer = ClassifierTrainer(model, logdir, args)
-    else:
-        trainer = PerspectiveTrainer(model, logdir, args)
+    trainer = PerspectiveTrainer(model, logdir, args)
 
     # draw curve
     x_epoch = []
@@ -221,89 +208,11 @@ def main(args):
                            train_prec_s, test_prec_s)
                 torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
 
-    def log_best2cam_strategy(result_type=('prec',), max_steps=4):
-        candidates = np.eye(N)
-        combinations = np.array(list(itertools.combinations(candidates, 2))).sum(1)
-        combination_indices = np.array(list(itertools.combinations(list(range(N)), 2)))
-        info_str = {}
-        # diagonal: step == 0
-        val_loss_diag, val_prec_diag, _, _ = trainer.test_cam_combination(val_loader, 0)
-        test_loss_diag, test_prec_diag, _, info_str[0] = trainer.test_cam_combination(test_loader, 0)
-        # non-diagonal: step == 1
-        val_loss_s, val_prec_s, val_oracle_s, _ = trainer.test_cam_combination(val_loader, 1)
-        test_loss_s, test_prec_s, test_oracle_s, info_str[1] = trainer.test_cam_combination(test_loader, 1)
-        for i in range(2, max_steps + 1):
-            _, _, _, info_str[i] = trainer.test_cam_combination(test_loader, i)
-        info_str = '\n'.join(info_str.values())
-
-        def combine2mat(diag_terms, non_diag_terms):
-            combined_mat = np.zeros([len(diag_terms), len(diag_terms)] + list(diag_terms.shape[1:]))
-            combined_mat[np.eye(len(diag_terms), dtype=bool)] = diag_terms
-            non_diag_indices = list(itertools.combinations(list(range(len(diag_terms))), 2))
-            for i in range(len(non_diag_indices)):
-                idx = non_diag_indices[i]
-                combined_mat[idx[0], idx[1]] = combined_mat[idx[1], idx[0]] = non_diag_terms[i]
-            return combined_mat
-
-        def find_cam(init_cam, combination_id):
-            cam_tuple = list(combination_indices[combination_id])
-            cam_tuple.remove(init_cam)
-            return cam_tuple[0]
-
-        val_loss_strategy = find_dataset_lvl_strategy(-val_loss_s, combinations)
-        val_metric_strategy = find_dataset_lvl_strategy(val_prec_s[:, 0], combinations)
-        test_metric_strategy = find_dataset_lvl_strategy(test_prec_s[:, 0], combinations)
-
-        _, prec = trainer.test(test_loader)
-        np.savetxt(f'{logdir}/losses_val_test.txt', np.concatenate([combine2mat(val_loss_diag, val_loss_s),
-                                                                    combine2mat(test_loss_diag, test_loss_s)]), '%.2f')
-        for i in range(len(result_type)):
-            fname = f'{result_type[i]}_{prec[i]:.1f}_' \
-                    f'Lstrategy{test_prec_s[val_loss_strategy].mean(0)[i]:.1f}_' \
-                    f'Rstrategy{test_prec_s[val_metric_strategy].mean(0)[i]:.1f}_' \
-                    f'theory{test_prec_s[test_metric_strategy].mean(0)[i]:.1f}_' \
-                    f'avg{test_prec_s.mean(0)[i]:.1f}.txt'
-            np.savetxt(f'{logdir}/{fname}',
-                       np.concatenate([combine2mat(val_prec_diag, val_prec_s)[:, :, i],
-                                       combine2mat(test_prec_diag, test_prec_s)[:, :, i]]), '%.1f',
-                       header=f'loading checkpoint...\n'
-                              f'{logdir}\n'
-                              f'val / test',
-                       footer=(f'\n{info_str}\n\n' if i == 0 else '') + f'\tdataset level: loss strategy\n' +
-                              ' '.join(f'cam {find_cam(cam, val_loss_strategy[cam])} |' for cam in range(N)) + '\n' +
-                              ' '.join(f'{test_prec_s[val_loss_strategy][cam, i]:.1f}% |'
-                                       for cam in range(N)) + '\n' +
-                              f'\tdataset level: result strategy\n' +
-                              ' '.join(f'cam {find_cam(cam, val_metric_strategy[cam])} |' for cam in range(N)) + '\n' +
-                              ' '.join(f'{test_prec_s[val_metric_strategy][cam, i]:.1f}% |'
-                                       for cam in range(N)) + '\n' +
-                              f'\tdataset level: theory\n' +
-                              ' '.join(f'cam {find_cam(cam, test_metric_strategy[cam])} |' for cam in range(N)) + '\n' +
-                              ' '.join(f'{test_prec_s[test_metric_strategy][cam, i]:.1f}% |'
-                                       for cam in range(N)) + '\n' +
-                              f'\tinstance level: oracle\n' +
-                              ' '.join(f'----- |' for cam in range(N)) + '\n' +
-                              ' '.join(f'{test_oracle_s[cam, i]:.1f}% |'
-                                       for cam in range(N)) + '\n' +
-                              f'2 best cam: loss_strategy {test_prec_s[val_loss_strategy].mean(0)[i]:.1f}, '
-                              f'result_strategy {test_prec_s[val_metric_strategy].mean(0)[i]:.1f}, '
-                              f'theory {test_prec_s[test_metric_strategy].mean(0)[i]:.1f}, '
-                              f'oracle {test_oracle_s.mean(0)[i]:.1f}, average {test_prec_s.mean(0)[i]:.1f}\n'
-                              f'all cam: {prec[i]:.1f}')
-            with open(f'{logdir}/{fname}', 'r') as fp:
-                if i == 0:
-                    print(fp.read())
-            if not args.eval and i == 0:
-                shutil.copyfile(f'{logdir}/{fname}', f'logs/{args.dataset}/{args.arch}_performance.txt')
-
     print('Test loaded model...')
     print(logdir)
-    if args.steps == 0:
-        log_best2cam_strategy(result_type)
-    else:
-        if args.eval:
-            trainer.test(test_loader, torch.eye(N))
-        trainer.test(test_loader)
+    if args.eval:
+        trainer.test(test_loader, torch.eye(N))
+    trainer.test(test_loader)
 
 
 if __name__ == '__main__':
@@ -313,7 +222,7 @@ if __name__ == '__main__':
     parser.add_argument('--arch', type=str, default='resnet18')
     parser.add_argument('--aggregation', type=str, default='max', choices=['mean', 'max'])
     parser.add_argument('-d', '--dataset', type=str, default='wildtrack',
-                        choices=['wildtrack', 'multiviewx', 'modelnet40_12', 'modelnet40_20', 'scanobjectnn'])
+                        choices=['wildtrack', 'multiviewx', 'modelnet40_12', 'modelnet40_20', 'scanobjectnn', 'carlax'])
     parser.add_argument('-j', '--num_workers', type=int, default=4)
     parser.add_argument('-b', '--batch_size', type=int, default=None, help='input batch size for training')
     parser.add_argument('--dropcam', type=float, default=0.0)
