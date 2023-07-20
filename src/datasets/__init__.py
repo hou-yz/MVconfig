@@ -3,3 +3,4 @@ from .multiviewx import MultiviewX
 from .frameDataset import frameDataset
 from .modelnet40 import ModelNet40
 from .scanobjectnn import ScanObjectNN
+from .carlax import CarlaX

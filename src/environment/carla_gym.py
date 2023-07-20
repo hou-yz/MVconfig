@@ -144,9 +144,9 @@ class CarlaMultiCameraEnv(gym.Env):
         self.world = self.client.load_world(self.opts["map"])
 
         # CarlaX is xy indexing; x,y (w,h) (n_col,n_row)
-        x_min, x_max, _, _, _, _ = opts["spawn_area"]
-        self.map_width = x_max - x_min
-        print(self.map_width)
+        # x_min, x_max, _, _, _, _ = opts["spawn_area"]
+        # self.map_width = x_max - x_min
+        # print(self.map_width)
 
         # step counter for deciding whether episode ends
         self.step_counter = 0
@@ -227,7 +227,9 @@ class CarlaMultiCameraEnv(gym.Env):
             "images": self.render(),
             "camera_configs": encode_camera_cfg(self.camera_configs, self.opts),
         }
-        info = {"pedestrian_gts": self.pedestrian_gts}  # Set any additional information
+        info = {"pedestrian_gts": self.pedestrian_gts,
+                "camera_intrinsics": self.camera_intrinsics,
+                "camera_extrinsics": self.camera_extrinsics}  # Set any additional information
 
         # NOTE: Remember that Python only returns a reference to these objects
         # you may need to use copy.deepcopy() to avoid effects from further steps
@@ -284,9 +286,11 @@ class CarlaMultiCameraEnv(gym.Env):
         # Set the reward for the current step
         reward = 0
         # Set condition for the end of episode: after a fixed number of step() call
-        done = self.step_counter >= self.opts["num_frame"]  # Set whether the episode has terminated or not
+        done = self.step_counter >= self.opts["num_step"]  # Set whether the episode has terminated or not
         # Set any additional information, the info can be used to calculate reward outside gym env
-        info = {"pedestrian_gts": copy.deepcopy(self.pedestrian_gts)}
+        info = {"pedestrian_gts": copy.deepcopy(self.pedestrian_gts),
+                "camera_intrinsics": self.camera_intrinsics,
+                "camera_extrinsics": self.camera_extrinsics}
 
         # NOTE: Remember that Python only returns a reference to these objects
         # you may need to use copy.deepcopy() to avoid effects from further steps
@@ -370,9 +374,10 @@ class CarlaMultiCameraEnv(gym.Env):
         print(f"{len(self.pedestrians)} pedestrians spawned")
 
         print("Stabilizing world...")
-        for _ in range(50):
-            self.world.tick()
-            time.sleep(0.01)
+        # for _ in range(50):
+        #     self.world.tick()
+        #     time.sleep(0.01)
+        self.world.tick()
         print("World stabilized")
 
         self.update_pedestrian_gts()
@@ -429,11 +434,11 @@ class CarlaMultiCameraEnv(gym.Env):
         pedestrian_view = []
         # add all cameras to the views attribute
         for id in self.cameras.keys():
-            verts = [v for v in bbox.get_world_vertices(actor.get_transform())]
-            x_max = -10000
-            x_min = 10000
-            y_max = -10000
-            y_min = 10000
+            # verts = [v for v in bbox.get_world_vertices(actor.get_transform())]
+            x_max = 0
+            x_min = float(self.opts["cam_x"])
+            y_max = 0
+            y_min = float(self.opts["cam_y"])
             for vert in verts:
                 # convert vert to homogeneous coordinate, vert is a carla.Location
                 vert_homo = np.array([vert.x, vert.y, vert.z, 1])
@@ -458,9 +463,9 @@ class CarlaMultiCameraEnv(gym.Env):
             # ):
             if (
                     x_max > 100
-                    or x_min < float(self.opts["cam_x"]) - 100
-                    or y_max > 100
-                    or y_min < float(self.opts["cam_y"]) - 100
+                    and x_min < float(self.opts["cam_x"]) - 100
+                    and y_max > 100
+                    and y_min < float(self.opts["cam_y"]) - 100
             ):
                 pedestrian_view.append(
                     {
