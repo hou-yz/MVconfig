@@ -58,9 +58,10 @@ def main(args):
 
         with open('./cfg/RL/1.cfg', "r") as fp:
             dataset_config = json.load(fp)
-        base = CarlaX(dataset_config)
+        base = CarlaX(dataset_config, args.seed)
 
         args.task = 'mvdet'
+        args.num_workers = 0
         result_type = ['moda', 'modp', 'prec', 'recall']
         args.lr = 5e-4 if args.lr is None else args.lr
         args.select_lr = 1e-4 if args.select_lr is None else args.select_lr
@@ -234,7 +235,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--visualize', action='store_true')
-    parser.add_argument('--seed', type=int, default=None, help='random seed')
+    parser.add_argument('--seed', type=int, default=0, help='random seed')
     parser.add_argument('--deterministic', type=str2bool, default=False)
     # MVSelect settings
     parser.add_argument('--steps', type=int, default=0,

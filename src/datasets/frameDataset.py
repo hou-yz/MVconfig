@@ -261,6 +261,9 @@ class frameDataset(VisionDataset):
             # record world gt
             if frame not in self.world_gt:
                 self.world_gt[frame] = (world_pt_s, world_pid_s)
+                gt_list = [np.concatenate([frame * np.ones([len(world_pt_s), 1]), world_pt_s], axis=1)
+                           for frame, (world_pt_s, world_pid_s) in self.world_gt.items()]
+                np.savetxt(self.gt_fname, np.concatenate(gt_list, axis=0), '%d')
             else:
                 assert (self.world_gt[frame][0] == world_pt_s).all()
         else:
@@ -377,14 +380,14 @@ if __name__ == '__main__':
     dataloader = DataLoader(dataset, 2, True, num_workers=0)
     # imgs, world_gt, imgs_gt, M, frame, keep_cams = next(iter(dataloader))
     t0 = time.time()
-    for i in range(2):
+    for i in range(20):
         (imgs, world_gt, imgs_gt, M, frame, keep_cams), proj_mats = dataset.__getitem__(i % len(dataset),
                                                                                         visualize=False)
-        if dataset.base.__name__ == 'CarlaX':
-            done = False
-            while not done:
-                (imgs, world_gt, imgs_gt, M, frame, keep_cams), proj_mats, done = dataset.step(
-                    np.random.rand(dataset.num_cam, 7))
+        # if dataset.base.__name__ == 'CarlaX':
+        #     done = False
+        #     while not done:
+        #         (imgs, world_gt, imgs_gt, M, frame, keep_cams), proj_mats, done = dataset.step(
+        #             np.random.rand(dataset.num_cam, 7))
     print(time.time() - t0)
 
     pass

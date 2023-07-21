@@ -371,14 +371,14 @@ class CarlaMultiCameraEnv(gym.Env):
             if not res.error:
                 # if error happens, very likely to be spawning failure caused by collision
                 self.pedestrians.append(res.actor_id)
-        print(f"{len(self.pedestrians)} pedestrians spawned")
+        # print(f"{len(self.pedestrians)} pedestrians spawned")
 
-        print("Stabilizing world...")
+        # print("Stabilizing world...")
         # for _ in range(50):
         #     self.world.tick()
         #     time.sleep(0.01)
         self.world.tick()
-        print("World stabilized")
+        # print("World stabilized")
 
         self.update_pedestrian_gts()
 
@@ -424,7 +424,7 @@ class CarlaMultiCameraEnv(gym.Env):
                     "views": self.get_pedestrian_views(actor),
                 }
             )
-        print(f"Collected {len(self.pedestrian_gts)} pedestrian information")
+        # print(f"Collected {len(self.pedestrian_gts)} pedestrian information")
 
     def get_pedestrian_views(self, actor):
         bbox = actor.bounding_box
