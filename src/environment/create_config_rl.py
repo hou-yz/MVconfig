@@ -13,7 +13,6 @@ def main():
     config = {
         "map": "Town04",
         "num_cam": 4,
-        "num_step": 4,
         "num_frame": 400,
         "map_expand": 40,
         "cam_x": 1920,
