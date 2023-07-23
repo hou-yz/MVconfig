@@ -137,7 +137,7 @@ class PerspectiveTrainer(BaseTrainer):
         t0 = time.time()
         action_sum = torch.zeros([dataloader.dataset.num_cam]).cuda()
         return_avg = None
-        for batch_idx, ((imgs, world_gt, imgs_gt, aug_mats, frame, keep_cams), proj_mats) in enumerate(dataloader):
+        for batch_idx, (imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].flatten(0, 1)
@@ -201,7 +201,7 @@ class PerspectiveTrainer(BaseTrainer):
         modas, modps, precs, recalls = torch.zeros([K]), torch.zeros([K]), torch.zeros([K]), torch.zeros([K])
         res_list = [[] for _ in range(K)]
         action_sum = torch.zeros([K, dataloader.dataset.num_cam]).cuda()
-        for batch_idx, ((imgs, world_gt, imgs_gt, aug_mats, frame, keep_cams), proj_mats) in enumerate(dataloader):
+        for batch_idx, (imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame, keep_cams) in enumerate(dataloader):
             B, N = imgs_gt['heatmap'].shape[:2]
             world_heatmaps, world_offsets, actions = [], [], []
             with torch.no_grad():
@@ -252,11 +252,10 @@ class PerspectiveTrainer(BaseTrainer):
                                zip(idx, F.normalize(action_sum[k], p=1, dim=0).cpu()[idx])))
 
             res = torch.cat(res_list[k], dim=0).numpy() if res_list[k] else np.empty([0, 3])
-            np.savetxt(f'{self.logdir}/test.txt', res, '%d')
-            moda, modp, precision, recall = evaluate(f'{self.logdir}/test.txt',
-                                                     dataloader.dataset.gt_fname,
-                                                     dataloader.dataset.base.__name__,
-                                                     dataloader.dataset.frames)
+            # np.savetxt(f'{self.logdir}/test.txt', res, '%d')
+            moda, modp, precision, recall, stats = evaluateDetection_py(res,
+                                                                        dataloader.dataset.gt_array,
+                                                                        dataloader.dataset.frames)
             print(f'Test, loss: {losses[k] / len(dataloader):.6f}, moda: {moda:.1f}%, modp: {modp:.1f}%, '
                   f'prec: {precision:.1f}%, recall: {recall:.1f}%' +
                   ('' if init_cam is not None else f', time: {time.time() - t0:.1f}s'))

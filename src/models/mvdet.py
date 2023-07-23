@@ -173,7 +173,7 @@ if __name__ == '__main__':
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
 
     model = MVDet(dataset).cuda()
-    (imgs, world_gt, imgs_gt, aug_mats, frame, keep_cams), proj_mats = next(iter(dataloader))
+    (imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame, keep_cams) = next(iter(dataloader))
     keep_cams[0, 3] = 0
     init_cam = 0
     model.train()
