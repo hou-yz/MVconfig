@@ -2,15 +2,15 @@ import numpy as np
 from src.evaluation.pyeval.evaluateDetection import evaluateDetection_py
 
 
-def evaluate(res_fpath, gt_fpath, dataset='wildtrack', frames=None):
+def evaluate(res, gt, dataset='wildtrack', frames=None):
     try:
         import matlab.engine
         eng = matlab.engine.start_matlab()
         eng.cd('src/evaluation/motchallenge-devkit')
-        res = eng.evaluateDetection(res_fpath, gt_fpath, dataset)
+        res = eng.evaluateDetection(res, gt, dataset)
         recall, precision, moda, modp = np.array(res['detMets']).squeeze()[[0, 1, -2, -1]]
     except:
-        recall, precision, moda, modp, stats = evaluateDetection_py(res_fpath, gt_fpath, frames)
+        recall, precision, moda, modp, stats = evaluateDetection_py(res, gt, frames)
     return recall, precision, moda, modp
 
 

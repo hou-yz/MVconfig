@@ -58,7 +58,7 @@ def main(args):
 
         with open('./cfg/RL/1.cfg', "r") as fp:
             dataset_config = json.load(fp)
-        base = CarlaX(dataset_config, args.seed)
+        base = CarlaX(dataset_config, args.carla_seed)
 
         args.task = 'mvdet'
         args.num_workers = 0
@@ -211,8 +211,8 @@ def main(args):
 
     print('Test loaded model...')
     print(logdir)
-    if args.eval:
-        trainer.test(test_loader, torch.eye(N))
+    # if args.eval:
+    #     trainer.test(test_loader, torch.eye(N))
     trainer.test(test_loader)
 
 
@@ -235,7 +235,8 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--visualize', action='store_true')
-    parser.add_argument('--seed', type=int, default=0, help='random seed')
+    parser.add_argument('--seed', type=int, default=None, help='random seed')
+    parser.add_argument('--carla_seed', type=int, default=2023, help='random seed for CarlaX')
     parser.add_argument('--deterministic', type=str2bool, default=False)
     # MVSelect settings
     parser.add_argument('--steps', type=int, default=0,
