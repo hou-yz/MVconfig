@@ -21,7 +21,6 @@ from src.utils.logger import Logger
 from src.utils.draw_curve import draw_curve
 from src.utils.str2bool import str2bool
 from src.trainer import PerspectiveTrainer, find_dataset_lvl_strategy
-from src.trainer_mvcnn import ClassifierTrainer
 
 
 def main(args):
@@ -102,7 +101,7 @@ def main(args):
                                 img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                                 img_kernel_size=args.img_kernel_size)
 
-    if args.steps:
+    if args.interactive:
         args.lr /= 5
         # args.epochs *= 2
 
@@ -120,11 +119,10 @@ def main(args):
     N = train_set.num_cam
 
     # logging
-    select_settings = f'steps{args.steps}_'
     lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
-                  f'select{args.select_lr}' if args.steps else ''
+                  f'select{args.select_lr}' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_down{args.down}_' \
-             f'{select_settings if args.steps else ""}' \
+             f'{"RL_" if args.interactive else ""}' \
              f'lr{args.lr}{lr_settings}_b{args.batch_size}_e{args.epochs}_dropcam{args.dropcam}_' \
              f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
         else f'logs/{args.dataset}/EVAL_{args.resume}'
@@ -144,7 +142,7 @@ def main(args):
                   args.use_bottleneck, args.hidden_dim, args.outfeat_dim).cuda()
 
     # load checkpoint
-    if args.steps:
+    if args.interactive:
         with open(f'logs/{args.dataset}/{args.arch}_performance.txt', 'r') as fp:
             result_str = fp.read()
         print(result_str)
@@ -197,7 +195,7 @@ def main(args):
             train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler)
             if epoch % max(args.epochs // 10, 1) == 0:
                 print('Testing...')
-                test_loss, test_prec = trainer.test(test_loader, torch.eye(N) if args.steps else None)
+                test_loss, test_prec = trainer.test(test_loader, torch.eye(N) if args.interactive else None)
 
                 # draw & save
                 x_epoch.append(epoch)
@@ -238,20 +236,17 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=None, help='random seed')
     parser.add_argument('--carla_seed', type=int, default=2023, help='random seed for CarlaX')
     parser.add_argument('--deterministic', type=str2bool, default=False)
-    # MVSelect settings
-    parser.add_argument('--steps', type=int, default=0,
-                        help='number of camera views to choose. if 0, then no selection')
+    # MVcontrol settings
+    parser.add_argument('--interactive', type=str2bool, default=False)
     parser.add_argument('--gamma', type=float, default=0.99, help='reward discount factor (default: 0.99)')
     parser.add_argument('--down', type=int, default=1, help='down sample the image to 1/N size')
     # parser.add_argument('--beta_entropy', type=float, default=0.01)
     # multiview detection specific settings
-    parser.add_argument('--eval_init_cam', type=str2bool, default=False,
-                        help='only consider pedestrians covered by the initial camera')
     parser.add_argument('--reID', action='store_true')
     parser.add_argument('--augmentation', type=str2bool, default=True)
     parser.add_argument('--id_ratio', type=float, default=0)
     parser.add_argument('--cls_thres', type=float, default=0.6)
-    parser.add_argument('--alpha', type=float, default=1.0, help='ratio for per view loss')
+    parser.add_argument('--alpha', type=float, default=0.0, help='ratio for per view loss')
     parser.add_argument('--use_mse', type=str2bool, default=False)
     parser.add_argument('--use_bottleneck', type=str2bool, default=True)
     parser.add_argument('--hidden_dim', type=int, default=128)
