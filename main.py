@@ -3,6 +3,7 @@ import os
 os.environ['OMP_NUM_THREADS'] = '1'
 import time
 import itertools
+import json
 import argparse
 import sys
 import shutil
@@ -14,13 +15,13 @@ import numpy as np
 import torch
 from torch import optim
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from src.datasets import *
 from src.models.mvdet import MVDet
-from src.models.mvcnn import MVCNN
 from src.utils.logger import Logger
 from src.utils.draw_curve import draw_curve
 from src.utils.str2bool import str2bool
-from src.trainer import PerspectiveTrainer, find_dataset_lvl_strategy
+from src.trainer import PerspectiveTrainer
 
 
 def main(args):
@@ -52,30 +53,11 @@ def main(args):
 
     # dataset
     if args.dataset == 'carlax':
-
-        import json
-
         with open('./cfg/RL/1.cfg', "r") as fp:
             dataset_config = json.load(fp)
         base = CarlaX(dataset_config, args.carla_seed)
-
-        args.task = 'mvdet'
         args.num_workers = 0
-        result_type = ['moda', 'modp', 'prec', 'recall']
-        args.lr = 5e-4 if args.lr is None else args.lr
-        args.select_lr = 1e-4 if args.select_lr is None else args.select_lr
-        args.batch_size = 1 if args.batch_size is None else args.batch_size
-
-        train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
-                                 img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                                 img_kernel_size=args.img_kernel_size,
-                                 dropout=args.dropcam, augmentation=args.augmentation)
-        val_set = frameDataset(base, split='val', world_reduce=args.world_reduce,
-                               img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                               img_kernel_size=args.img_kernel_size)
-        test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
-                                img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                                img_kernel_size=args.img_kernel_size)
+        args.batch_size = 1
     else:
         if args.dataset == 'wildtrack':
             base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
@@ -83,23 +65,21 @@ def main(args):
             base = MultiviewX(os.path.expanduser('~/Data/MultiviewX'))
         else:
             raise Exception('must choose from [wildtrack, multiviewx]')
-
-        args.task = 'mvdet'
-        result_type = ['moda', 'modp', 'prec', 'recall']
-        args.lr = 5e-4 if args.lr is None else args.lr
-        args.select_lr = 1e-4 if args.select_lr is None else args.select_lr
         args.batch_size = 1 if args.batch_size is None else args.batch_size
+        args.interactive = False
 
-        train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
-                                 img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                                 img_kernel_size=args.img_kernel_size,
-                                 dropout=args.dropcam, augmentation=args.augmentation)
-        val_set = frameDataset(base, split='val', world_reduce=args.world_reduce,
-                               img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                               img_kernel_size=args.img_kernel_size)
-        test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
-                                img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                                img_kernel_size=args.img_kernel_size)
+    train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
+                             img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
+                             img_kernel_size=args.img_kernel_size, augmentation=args.augmentation,
+                             interactive=args.interactive)
+    val_set = frameDataset(base, split='val', world_reduce=args.world_reduce,
+                           img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
+                           img_kernel_size=args.img_kernel_size,
+                           interactive=args.interactive)
+    test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
+                            img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
+                            img_kernel_size=args.img_kernel_size,
+                            interactive=args.interactive)
 
     if args.interactive:
         args.lr /= 5
@@ -116,12 +96,11 @@ def main(args):
                             pin_memory=True, worker_init_fn=seed_worker)
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                              pin_memory=True, worker_init_fn=seed_worker)
-    N = train_set.num_cam
 
     # logging
     lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
-                  f'select{args.select_lr}' if args.interactive else ''
-    logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_down{args.down}_' \
+                  f'control{args.control_lr}' if args.interactive else ''
+    logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_' \
              f'{"RL_" if args.interactive else ""}' \
              f'lr{args.lr}{lr_settings}_b{args.batch_size}_e{args.epochs}_dropcam{args.dropcam}_' \
              f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
@@ -143,15 +122,24 @@ def main(args):
 
     # load checkpoint
     if args.interactive:
-        with open(f'logs/{args.dataset}/{args.arch}_performance.txt', 'r') as fp:
-            result_str = fp.read()
-        print(result_str)
-        load_dir = result_str.split('\n')[1].replace('# ', '')
+        with open(f'logs/{args.dataset}/{args.arch}_.txt', 'r') as fp:
+            load_dir = fp.read()
+        print(load_dir)
         pretrained_dict = torch.load(f'{load_dir}/model.pth')
         model_dict = model.state_dict()
-        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'select' not in k}
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'control' not in k}
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
+        # tensorboard logging
+        writer = SummaryWriter(logdir)
+        writer.add_text("hyperparameters",
+                        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
+                                                                 for key, value in vars(args).items()])))
+    else:
+        with open(f'logs/{args.dataset}/{args.arch}_.txt', 'w') as fp:
+            fp.write(logdir)
+
+        writer = None
 
     if args.resume:
         print(f'loading checkpoint: logs/{args.dataset}/{args.resume}')
@@ -162,12 +150,12 @@ def main(args):
         model.load_state_dict(model_dict)
 
     param_dicts = [{"params": [p for n, p in model.named_parameters()
-                               if 'base' not in n and 'select' not in n and p.requires_grad],
-                    "lr": args.lr * args.other_lr_ratio, },
+                               if 'base' not in n and 'control' not in n and p.requires_grad],
+                    "lr": args.lr * args.other_lr_ratio, } if not args.interactive else {"params": [], "lr": 0},
                    {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
-                    "lr": args.lr * args.base_lr_ratio, },
-                   {"params": [p for n, p in model.named_parameters() if 'select' in n and p.requires_grad],
-                    "lr": args.select_lr, }, ]
+                    "lr": args.lr * args.base_lr_ratio, } if not args.interactive else {"params": [], "lr": 0},
+                   {"params": [p for n, p in model.named_parameters() if 'control' in n and p.requires_grad],
+                    "lr": args.control_lr, }, ]
     optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
     def warmup_lr_scheduler(epoch, warmup_epochs=0.1 * args.epochs):
@@ -176,9 +164,10 @@ def main(args):
         else:
             return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
+    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
+    scheduler = None
 
-    trainer = PerspectiveTrainer(model, logdir, args)
+    trainer = PerspectiveTrainer(model, logdir, writer, args)
 
     # draw curve
     x_epoch = []
@@ -189,13 +178,12 @@ def main(args):
 
     # learn
     if not args.eval:
-        # trainer.test(test_loader)
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
             train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler)
             if epoch % max(args.epochs // 10, 1) == 0:
                 print('Testing...')
-                test_loss, test_prec = trainer.test(test_loader, torch.eye(N) if args.interactive else None)
+                test_loss, test_prec = trainer.test(test_loader)
 
                 # draw & save
                 x_epoch.append(epoch)
@@ -209,25 +197,24 @@ def main(args):
 
     print('Test loaded model...')
     print(logdir)
-    # if args.eval:
-    #     trainer.test(test_loader, torch.eye(N))
     trainer.test(test_loader)
+    if args.interactive:
+        writer.close()
 
 
 if __name__ == '__main__':
     # common settings
-    parser = argparse.ArgumentParser(description='view selection for multiview classification & detection')
+    parser = argparse.ArgumentParser(description='view control for multiview detection')
     parser.add_argument('--eval', action='store_true', help='evaluation only')
     parser.add_argument('--arch', type=str, default='resnet18')
     parser.add_argument('--aggregation', type=str, default='max', choices=['mean', 'max'])
     parser.add_argument('-d', '--dataset', type=str, default='wildtrack',
-                        choices=['wildtrack', 'multiviewx', 'modelnet40_12', 'modelnet40_20', 'scanobjectnn', 'carlax'])
+                        choices=['wildtrack', 'multiviewx', 'carlax'])
     parser.add_argument('-j', '--num_workers', type=int, default=4)
     parser.add_argument('-b', '--batch_size', type=int, default=None, help='input batch size for training')
     parser.add_argument('--dropcam', type=float, default=0.0)
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train')
-    parser.add_argument('--lr', type=float, default=None, help='learning rate for task network')
-    parser.add_argument('--select_lr', type=float, default=None, help='learning rate for MVselect')
+    parser.add_argument('--lr', type=float, default=5e-4, help='learning rate for task network')
     parser.add_argument('--base_lr_ratio', type=float, default=1.0)
     parser.add_argument('--other_lr_ratio', type=float, default=1.0)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
@@ -237,10 +224,35 @@ if __name__ == '__main__':
     parser.add_argument('--carla_seed', type=int, default=2023, help='random seed for CarlaX')
     parser.add_argument('--deterministic', type=str2bool, default=False)
     # MVcontrol settings
-    parser.add_argument('--interactive', type=str2bool, default=False)
+    parser.add_argument('--interactive', action='store_true')
+    # RL arguments
+    parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
+    parser.add_argument("--reward", default='cover', choices=['cover', 'loss', 'moda'])
+    parser.add_argument("--gae", action='store_true',
+                        help="Use GAE for advantage computation")
+    parser.add_argument("--gae_lambda", type=float, default=0.95,
+                        help="the lambda for the general advantage estimation")
+    parser.add_argument("--rl_batch_size", type=int, default=256,
+                        help="the number of steps to run in each environment per policy rollout, default: 2048")
+    parser.add_argument("--rl_minibatch_size", type=int, default=32,
+                        help="RL mini-batches, default: 64")
+    parser.add_argument("--rl_update_epochs", type=int, default=10,
+                        help="the K epochs to update the policy")
     parser.add_argument('--gamma', type=float, default=0.99, help='reward discount factor (default: 0.99)')
-    parser.add_argument('--down', type=int, default=1, help='down sample the image to 1/N size')
-    # parser.add_argument('--beta_entropy', type=float, default=0.01)
+    parser.add_argument("--rl_norm_adv", type=str2bool, default=True,
+                        help="Toggles advantages normalization")
+    parser.add_argument("--rl_clip_coef", type=float, default=0.2,
+                        help="the surrogate clipping coefficient")
+    parser.add_argument("--rl_clip_vloss", type=str2bool, default=True,
+                        help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
+    parser.add_argument("--rl_ent_coef", type=float, default=0.0,
+                        help="coefficient of the entropy")
+    parser.add_argument("--rl_vf_coef", type=float, default=0.5,
+                        help="coefficient of the value function")
+    parser.add_argument("--rl_max_grad_norm", type=float, default=0.5,
+                        help="the maximum norm for the gradient clipping")
+    parser.add_argument("--rl_target_kl", type=float, default=None,
+                        help="the target KL divergence threshold")
     # multiview detection specific settings
     parser.add_argument('--reID', action='store_true')
     parser.add_argument('--augmentation', type=str2bool, default=True)
