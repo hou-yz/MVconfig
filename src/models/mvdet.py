@@ -7,7 +7,7 @@ import torchvision.transforms as T
 from kornia.geometry import warp_perspective
 from src.models.resnet import resnet18
 from src.models.shufflenetv2 import shufflenet_v2_x0_5
-from src.models.mvselect import CamSelect
+from src.models.mvcontrol import CamControl
 from src.models.multiview_base import MultiviewBase
 from src.utils.image_utils import img_color_denormalize, array2heatmap
 from src.utils.projection import get_worldcoord_from_imgcoord_mat, project_2d_points
@@ -40,34 +40,36 @@ class MVDet(MultiviewBase):
         if arch == 'resnet18':
             self.base = nn.Sequential(*list(resnet18(pretrained=True,
                                                      replace_stride_with_dilation=[False, True, True]).children())[:-2])
-            base_dim = 512
+            self.base_dim = 512
         elif arch == 'shufflenet0.5':
             self.base = nn.Sequential(*list(shufflenet_v2_x0_5(pretrained=True,
                                                                replace_stride_with_dilation=[False, True, True]
                                                                ).children())[:-2])
-            base_dim = 192
+            self.base_dim = 192
         else:
             raise Exception('architecture currently support [vgg11, resnet18]')
 
         if use_bottleneck:
-            self.bottleneck = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 1), nn.ReLU())
-            base_dim = hidden_dim
+            self.bottleneck = nn.Sequential(nn.Conv2d(self.base_dim, hidden_dim, 1), nn.ReLU())
+            self.base_dim = hidden_dim
         else:
             self.bottleneck = nn.Identity()
 
         # img heads
-        self.img_heatmap = output_head(base_dim, outfeat_dim, 1)
-        self.img_offset = output_head(base_dim, outfeat_dim, 2)
-        self.img_wh = output_head(base_dim, outfeat_dim, 2)
+        self.img_heatmap = output_head(self.base_dim, outfeat_dim, 1)
+        self.img_offset = output_head(self.base_dim, outfeat_dim, 2)
+        self.img_wh = output_head(self.base_dim, outfeat_dim, 2)
         # self.img_id = output_head(base_dim, outfeat_dim, len(dataset.pid_dict))
 
         # world feat
-        self.world_feat = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 3, padding=1), nn.ReLU(),
+        self.world_feat = nn.Sequential(nn.Conv2d(self.base_dim, hidden_dim, 3, padding=1), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=2, dilation=2), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
 
-        # select camera based on initialization
-        self.select_module = CamSelect(dataset.num_cam, hidden_dim, 3, aggregation)
+        if dataset.action_dim is not None:
+            self.control_module = CamControl(dataset, self.base_dim)
+        else:
+            self.control_module = None
 
         # world heads
         self.world_heatmap = output_head(hidden_dim, outfeat_dim, 1)
@@ -82,24 +84,21 @@ class MVDet(MultiviewBase):
         fill_fc_weights(self.world_offset)
         pass
 
-    def get_feat(self, imgs, M, proj_mats, down=1, visualize=False):
+    def get_feat(self, imgs, M, proj_mats, visualize=False):
         B, N, _, H, W = imgs.shape
-        imgs = F.interpolate(imgs.flatten(0, 1), scale_factor=1 / down)
+        imgs = imgs.flatten(0, 1)
 
         inverse_aug_mats = torch.inverse(M.view([B * N, 3, 3]))
         # image and world feature maps from xy indexing, change them into world indexing / xy indexing (img)
         imgcoord_from_Rimggrid_mat = inverse_aug_mats @ \
-                                     torch.diag(torch.tensor([self.img_reduce * down, self.img_reduce * down, 1])
+                                     torch.diag(torch.tensor([self.img_reduce, self.img_reduce, 1])
                                                 ).unsqueeze(0).repeat(B * N, 1, 1).float()
-        # Rworldgrid(xy)_from_Rimggrid(xy)
-        # proj_mats = torch.diag(torch.tensor([1 / down, 1 / down, 1])).unsqueeze(0).repeat(B * N, 1, 1).float() @ \
-        #             self.proj_mats.unsqueeze(0).repeat(B, 1, 1, 1).flatten(0, 1) @ imgcoord_from_Rimggrid_mat
         proj_mats = proj_mats[:, :N].flatten(0, 1) @ imgcoord_from_Rimggrid_mat
 
         if visualize:
             denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
             proj_imgs = warp_perspective(F.interpolate(imgs, scale_factor=1 / 8), proj_mats.to(imgs.device),
-                                         (self.Rworld_shape / down).astype(int)).unflatten(0, [B, N])
+                                         self.Rworld_shape).unflatten(0, [B, N])
             for cam in range(N):
                 visualize_img = T.ToPILImage()(denorm(imgs.detach())[cam * B])
                 # visualize_img.save(f'../../imgs/augimg{cam + 1}.png')
@@ -134,12 +133,13 @@ class MVDet(MultiviewBase):
                 plt.imshow(visualize_img)
                 plt.show()
 
-        # world_feat = self.world_feat_pre(world_feat) * keep_cams.view(B * N, 1, 1, 1).to(imgs.device)
         return world_feat, (F.interpolate(imgs_heatmap, tuple(self.Rimg_shape)),
                             F.interpolate(imgs_offset, tuple(self.Rimg_shape)),
                             F.interpolate(imgs_wh, tuple(self.Rimg_shape)))
 
     def get_output(self, world_feat, visualize=False):
+        B, N, C, H, W = world_feat.shape
+        world_feat = world_feat.mean(dim=1) if self.aggregation == 'mean' else world_feat.max(dim=1)[0]
 
         # world heads
         world_feat = self.world_feat(world_feat)
@@ -173,11 +173,9 @@ if __name__ == '__main__':
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
 
     model = MVDet(dataset).cuda()
-    (imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame, keep_cams) = next(iter(dataloader))
-    keep_cams[0, 3] = 0
-    init_cam = 0
+    (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) = next(iter(dataloader))
     model.train()
-    (world_heatmap, world_offset), _, cam_train = model(imgs.cuda(), aug_mats, proj_mats, 2, init_cam, 3)
+    (world_heatmap, world_offset), _, cam_train = model(imgs.cuda(), aug_mats, proj_mats, 2)
     xysc_train = ctdet_decode(world_heatmap, world_offset)
     # macs, params = profile(model, inputs=(imgs[:, :3].cuda(), aug_mats[:, :3].contiguous()))
     # macs, params = profile(model.select_module, inputs=(torch.randn([1, 128, 160, 250]).cuda(),
