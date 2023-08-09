@@ -67,7 +67,7 @@ def read_pom(root):
 class frameDataset(VisionDataset):
     def __init__(self, base, split='train', reID=False, world_reduce=4, img_reduce=12,
                  world_kernel_size=10, img_kernel_size=10,
-                 split_ratio=(0.8, 0.1, 0.1), top_k=100, force_download=True, dropout=0.0, augmentation=False,
+                 split_ratio=(0.8, 0.1, 0.1), top_k=100, force_download=True, augmentation=False,
                  interactive=False):
         super().__init__(base.root)
 
@@ -79,7 +79,6 @@ class frameDataset(VisionDataset):
         self.world_reduce, self.img_reduce = world_reduce, img_reduce
         self.img_shape, self.worldgrid_shape = base.img_shape, base.worldgrid_shape  # H,W; N_row,N_col
         self.world_kernel_size, self.img_kernel_size = world_kernel_size, img_kernel_size
-        self.dropout = dropout
         self.transform = T.Compose([T.ToTensor(), T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
                                     T.Resize((np.array(self.img_shape) * 8 // self.img_reduce).tolist())])
         self.augmentation = augmentation
@@ -111,14 +110,16 @@ class frameDataset(VisionDataset):
             self.frames = list(frame_range)
             self.world_gt = {}
             self.gt_array = np.array([]).reshape([0, 3])
+            self.config_dim = base.env.observation_space['camera_configs'].shape[0]
+            self.action_dim = base.env.action_space.shape[0] if interactive else None
         else:
             # get camera matrices
             self.proj_mats = self.get_world_imgs_trans()
             # get image & world coverage masks
-            world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
-            self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')
-            img_masks = torch.ones([self.num_cam, 1, self.base.img_shape[0], self.base.img_shape[1]])
-            self.Rworld_coverage = warp_perspective(img_masks, self.proj_mats, self.Rworld_shape)
+            # world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
+            # self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')
+            # img_masks = torch.ones([self.num_cam, 1, self.base.img_shape[0], self.base.img_shape[1]])
+            # self.Rworld_coverage = warp_perspective(img_masks, self.proj_mats, self.Rworld_shape)
 
             self.img_fpaths = self.get_image_fpaths(frame_range)
             self.world_gt, self.imgs_gt, self.pid_dict, self.frames = self.get_gt_targets(
@@ -153,6 +154,8 @@ class frameDataset(VisionDataset):
                 for cam in range(self.num_cam):
                     np.savetxt(f'{self.gt_fname}.{cam}', og_gt[cam], '%d')
             self.gt_array = np.loadtxt(self.gt_fname)
+            self.config_dim = None
+            self.action_dim = None
         pass
 
     def get_image_fpaths(self, frame_range):
@@ -245,21 +248,22 @@ class frameDataset(VisionDataset):
         return Rworldgrid_from_imgcoord
 
     def __getitem__(self, index, visualize=False):
-        frame = self.frames[index]
+        self.cur_frame = frame = self.frames[index]
         if self.base.__name__ == 'CarlaX':
-            observation, info = self.base.env.reset(seed=self.fixed_seeds[index], render_all_cams=not self.interactive)
+            observation, info = self.base.env.reset(seed=self.fixed_seeds[index])
             self.base.intrinsic_matrices, self.base.extrinsic_matrices = \
                 self.base.env.camera_intrinsics, self.base.env.camera_extrinsics
             # get camera matrices
             self.proj_mats = self.get_world_imgs_trans()
             # get image & world coverage masks
-            world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
-            self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')
-            img_masks = torch.ones([self.num_cam, 1, self.base.img_shape[0], self.base.img_shape[1]])
-            self.Rworld_coverage = warp_perspective(img_masks, self.proj_mats, self.Rworld_shape)
+            # world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
+            # self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')
+            # img_masks = torch.ones([self.num_cam, 1, self.base.img_shape[0], self.base.img_shape[1]])
+            # self.Rworld_coverage = warp_perspective(img_masks, self.proj_mats, self.Rworld_shape)
 
-            frame = self.frames[index]
             imgs = observation["images"]
+            configs = observation["camera_configs"]
+            step_counter = observation["step"]
             world_pts, world_lwh, world_pids, img_bboxs, img_pids = self.get_carla_gt_targets(info["pedestrian_gts"])
             world_pts, world_pids = world_pts[:, :2], world_pids
 
@@ -276,9 +280,11 @@ class frameDataset(VisionDataset):
         else:
             imgs = {cam: np.array(Image.open(self.img_fpaths[cam][frame]).convert('RGB'))
                     for cam in range(self.num_cam)}
+            configs = None
+            step_counter = None
             img_bboxs, img_pids = zip(*self.imgs_gt[frame].values())
             world_pts, world_pids = self.world_gt[frame]
-        return self.prepare_gt(frame, imgs, self.proj_mats, world_pts, world_pids, img_bboxs, img_pids)
+        return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids)
 
     def step(self, action):
         observation, reward, done, info = self.base.env.step(action)
@@ -294,11 +300,13 @@ class frameDataset(VisionDataset):
         self.Rworld_coverage = warp_perspective(img_masks, self.proj_mats, self.Rworld_shape)
 
         imgs = observation["images"]
+        configs = observation["camera_configs"]
+        step_counter = observation["step"]
         world_pts, world_lwh, world_pids, img_bboxs, img_pids = self.get_carla_gt_targets(info["pedestrian_gts"])
         world_pts, world_pids = world_pts[:, :2], world_pids
-        return self.prepare_gt(frame, imgs, self.proj_mats, world_pts, world_pids, img_bboxs, img_pids), done
+        return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids), done
 
-    def prepare_gt(self, frame, imgs, proj_mats, world_pts, world_pids, img_bboxs, img_pids, visualize=False):
+    def prepare_gt(self, imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, visualize=False):
         def plt_visualize():
             import cv2
             from matplotlib.patches import Circle
@@ -315,6 +323,13 @@ class frameDataset(VisionDataset):
                 cv2.rectangle(img0, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 2)
             plt.imshow(img0)
             plt.show()
+
+        if self.interactive and step_counter is not None:
+            imgs = {step_counter: imgs[step_counter]}
+            configs = np.array([config for cam, config in configs.items()], dtype=np.float32)
+        else:
+            step_counter = self.num_cam
+            configs = np.zeros([self.num_cam, 0])
 
         aug_imgs, aug_imgs_gt, aug_mats, aug_masks = [], [], [], []
         for cam, img in imgs.items():
@@ -340,18 +355,11 @@ class frameDataset(VisionDataset):
         aug_imgs = torch.stack(aug_imgs)
         aug_mats = torch.stack(aug_mats)
         aug_imgs_gt = {key: torch.stack([img_gt[key] for img_gt in aug_imgs_gt]) for key in aug_imgs_gt[0]}
-        drop, keep_cams = np.random.rand() < self.dropout, torch.ones(len(imgs), dtype=torch.bool)
-        if drop:
-            num_drop = np.random.randint(len(imgs) - 1)
-            drop_cams = np.random.choice(len(imgs), num_drop, replace=False)
-            for cam in drop_cams:
-                keep_cams[cam] = 0
-                for key in aug_imgs_gt:
-                    aug_imgs_gt[key][cam] = 0
         # world gt
         world_gt = get_centernet_gt(self.Rworld_shape, world_pts[:, 0], world_pts[:, 1], world_pids,
                                     reduce=self.world_reduce, top_k=self.top_k, kernel_size=self.world_kernel_size)
-        return aug_imgs, aug_mats, proj_mats[list(imgs.keys())], world_gt, aug_imgs_gt, frame, keep_cams
+        return (step_counter, configs, aug_imgs, aug_mats, self.proj_mats[list(imgs.keys())],
+                world_gt, aug_imgs_gt, self.cur_frame)
 
     def __len__(self):
         return len(self.frames)
@@ -379,7 +387,7 @@ if __name__ == '__main__':
         dataset_config = json.load(fp)
     # dataset = frameDataset(CarlaX(dataset_config), split_ratio=(0.01, 0.1, 0.1))
     dataset = frameDataset(CarlaX(dataset_config, seed=seed), split_ratio=(0.01, 0.1, 0.1), interactive=True)
-    # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', semi_supervised=.1)
+    # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train')
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train', semi_supervised=.1)
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', semi_supervised=0.5)
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train', semi_supervised=0.5)
@@ -393,13 +401,13 @@ if __name__ == '__main__':
     #         pass
     dataloader = DataLoader(dataset, 2, True, num_workers=0)
     t0 = time.time()
-    # imgs, M, proj_mats, world_gt, imgs_gt, frame, keep_cams = next(iter(dataloader))
+    step, configs, imgs, M, proj_mats, world_gt, imgs_gt, frame = next(iter(dataloader))
     for i in range(20):
-        imgs, M, proj_mats, world_gt, imgs_gt, frame, keep_cams = dataset.__getitem__(i % len(dataset))
+        step, configs, imgs, M, proj_mats, world_gt, imgs_gt, frame = dataset.__getitem__(i % len(dataset))
         if dataset.base.__name__ == 'CarlaX' and dataset.interactive:
             done = False
             while not done:
-                (imgs, M, proj_mats, world_gt, imgs_gt, frame, keep_cams), done = dataset.step(np.random.rand(7))
+                (step, configs, imgs, M, proj_mats, world_gt, imgs_gt, frame), done = dataset.step(np.random.rand(7))
 
     print(time.time() - t0)
     pass
