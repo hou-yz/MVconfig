@@ -12,8 +12,8 @@ from gym import spaces
 import numpy as np
 import matplotlib.pyplot as plt
 
-from .cameras import build_cam
-from .utils import loc_dist, pflat
+from src.environment.cameras import build_cam
+from src.environment.utils import loc_dist, pflat
 
 # render quality of CARLA
 QUALITY = ("Epic", "Low")
@@ -40,51 +40,50 @@ def run_carla(carla_path, off_screen=False, quality="Epic", gpu=2):
 
 
 def encode_camera_cfg(cfg, opts):
-    # convert location/rotation/fov (different ranges) to [0, 1]
+    [x, y, z, pitch, yaw, roll, fov] = cfg
+    # convert cfg: location/rotation/fov from different ranges to [-1, 1]
     # location
+    # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
     x_min, x_max, y_min, y_max, z_min, z_max = opts["spawn_area"]
-    # x, y, z = location[:, 0], location[:, 1], location[:, 2]
-    x = (cfg["x"] - x_min) / (x_max - x_min)
-    y = (cfg["y"] - y_min) / (y_max - y_min)
-    z = (cfg["z"] - z_min) / (z_max - z_min)
+    x = (x - x_min) / (x_max - x_min) * 2 - 1
+    y = (y - y_min) / (y_max - y_min) * 2 - 1
+    z = (z - z_min) / (z_max - z_min) * 2 - 1
     location = np.array([x, y, z])
     # rotation
-    # pitch, yaw, roll = rotation[:, 0], rotation[:, 1], rotation[:, 2]
-    pitch = (cfg["pitch"] + 90) / 180
-    yaw = (cfg["yaw"] + 180) / 360
-    roll = (cfg["roll"] + 90) / 180
+    # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
+    pitch = pitch / 90
+    yaw = yaw / 180
+    roll = roll / 180
     rotation = np.array([pitch, yaw, roll])
-
-    # fov
-    fov = np.array(cfg["fov"] / 180).reshape(-1)
-
+    # fov \in [0, 180]
+    fov = np.array(fov / 90 - 1).reshape(-1)
     # put location, rotation, fov together
-    act = np.concatenate([location, rotation, fov])
-    return act
+    cfg = np.concatenate([location, rotation, fov])
+    return cfg
 
 
-def decode_camera_cfg(action, opts):
+def decode_camera_cfg(cfg, opts):
     # action is for a SINGLE camera
-    location, rotation, fov = action[:3], action[3:6], action[6]
+    # convert cfg: location/rotation/fov from [-1, 1] to different ranges
+    [x, y, z, pitch, yaw, roll, fov] = cfg
+    # location
+    # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
     x_min, x_max, y_min, y_max, z_min, z_max = opts["spawn_area"]
-    # location based on spawn area (x_min,x_max,y_min,y_max)
-    x, y, z = location[0], location[1], location[2]
-    x = x * (x_max - x_min) + x_min
-    y = y * (y_max - y_min) + y_min
-    z = z * (z_max - z_min) + z_min
+    x = (x + 1) / 2 * (x_max - x_min) + x_min
+    y = (y + 1) / 2 * (y_max - y_min) + y_min
+    z = (z + 1) / 2 * (z_max - z_min) + z_min
     location = np.array([x, y, z])
     # rotation
-    pitch, yaw, roll = rotation[0], rotation[1], rotation[2]
-    # pitch Y-axis rotation angle: -90~90
-    pitch = pitch * 180 - 90
-    # yaw Z-axis rotation angle: -180~180
-    yaw = yaw * 360 - 180
-    # roll X-axis rotation angle: -90~90
-    roll = roll * 180 - 90
+    # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
+    pitch = pitch * 90
+    yaw = yaw * 180
+    roll = roll * 180
     rotation = np.array([pitch, yaw, roll])
-    # fov: [0, 180)
-    fov = 180 * fov
-    return location, rotation, fov
+    # fov \in [0, 180]
+    fov = np.array((fov + 1) * 90).reshape(-1)
+    # put location, rotation, fov together
+    cfg = np.concatenate([location, rotation, fov])
+    return cfg
 
 
 def draw_bbox(obs, info):
@@ -154,12 +153,13 @@ class CarlaCameraSeqEnv(gym.Env):
                     shape=(int(self.opts['cam_y']), int(self.opts['cam_x']), 3),
                     dtype=np.uint8,
                 ),
-                "camera_configs": spaces.Box(np.zeros([7]), np.ones([7]), dtype=np.float64)
+                "camera_configs": spaces.Box(-1, 1, shape=(7,)),
+                "step": spaces.Box(-1, self.num_cam - 1, shape=(1,), dtype=int)
             }
         )
 
         # Define your environment's action space
-        self.action_space = spaces.Box(np.zeros([7]), np.ones([7]), dtype=np.float64)
+        self.action_space = spaces.Box(-1, 1, shape=(len(self.opts["env_action_space"].split("-")),))
 
         # Define any other attributes or variables needed for your environment
         # turn on sync mode
@@ -183,8 +183,14 @@ class CarlaCameraSeqEnv(gym.Env):
         # camera config for the next camera
         # allow more flexible choice of action space (x-y-z-pitch-yaw-roll-fov)
         # convert normalised action space to unnormalised ones
-        _location, _rotation, _fov = decode_camera_cfg(act, self.opts)
         action_space = self.opts["env_action_space"].split("-")
+        action_dim_dict = {'x': 0, 'y': 1, 'z': 2, 'pitch': 3, 'yaw': 4, 'roll': 5, 'fov': 6}
+        _action = np.zeros(self.observation_space['camera_configs'].shape)
+        for i, action_name in enumerate(action_space):
+            _action[action_dim_dict[action_name]] = act[i]
+        _action = np.clip(_action, -1, 1)
+        _cfg = decode_camera_cfg(_action, self.opts)
+        _location, _rotation, _fov = _cfg[:3], _cfg[3:6], _cfg[6]
         # default settings for limited action space
         location, rotation, fov = np.array(self.opts["cam_pos_lst"])[self.step_counter], \
             np.array(self.opts["cam_dir_lst"])[self.step_counter], \
@@ -197,10 +203,10 @@ class CarlaCameraSeqEnv(gym.Env):
         if 'roll' in action_space: rotation[2] = _rotation[2]
         if 'fov' in action_space: fov = _fov
 
-        act = np.concatenate([location, rotation, fov], axis=0)
-        return act
+        action = np.concatenate([location, rotation, fov], axis=0)
+        return action
 
-    def reset(self, seed=None, render_all_cams=True):
+    def reset(self, seed=None):
         # if a new seed is provided, set generator to used new seed
         # otherwise use old seed
         if seed is not None:
@@ -213,11 +219,11 @@ class CarlaCameraSeqEnv(gym.Env):
         self.step_counter = 0
 
         # NOTE: render all cameras by default
-        cam_range = list(range(self.num_cam)) if render_all_cams else [0, ]
-        images = self.render()
         observation = {
-            "images": {cam: images[cam] for cam in cam_range},
-            "camera_configs": {cam: encode_camera_cfg(self.camera_configs[cam], self.opts) for cam in cam_range}
+            "images": self.render(),
+            "camera_configs": {cam: encode_camera_cfg(self.camera_configs[cam], self.opts)
+                               for cam in range(self.num_cam)},
+            "step": self.step_counter
         }
         info = {"pedestrian_gts": self.pedestrian_gts,
                 "camera_intrinsics": self.camera_intrinsics,
@@ -233,48 +239,23 @@ class CarlaCameraSeqEnv(gym.Env):
         # values are in the range of 0-1
         # Perform one step in the environment based on the given action
         action = self.action(action)
-        loc = carla.Location(*action[:3])
-        rot = carla.Rotation(*action[3:6])
-        fov = action[6]
-        new_transform = carla.Transform(loc, rot)
-        if float(self.cameras[self.step_counter].attributes["fov"]) != fov:
-            # change camera fov, first destroy the old camera
-            self.cameras[self.step_counter].destroy()
-            self.world.tick()
-            # create new camera blueprint
-            camera_bp = self.world.get_blueprint_library().find("sensor.camera.rgb")
-            camera_bp.set_attribute("image_size_x", str(self.opts["cam_x"]))
-            camera_bp.set_attribute("image_size_y", str(self.opts["cam_y"]))
-            camera_bp.set_attribute("fov", str(fov))
-            # spawn the camera
-            camera = self.world.spawn_actor(camera_bp, new_transform)
-            # record camera related information
-            self.cameras[self.step_counter] = camera
-        else:
-            # update the camera transform
-            self.cameras[self.step_counter].set_transform(new_transform)
-            # TODO: additional tick to stablelize world
-            self.world.tick()
-
-        # wait for one tick to update the camera actors
-        self.world.tick()
-
-        # update camera mats
-        cam_config, intrinsic, extrinsic = get_camera_config(self.cameras[self.step_counter])
-        self.camera_configs[self.step_counter] = cam_config
-        self.camera_intrinsics[self.step_counter] = intrinsic
-        self.camera_extrinsics[self.step_counter] = extrinsic
+        cfg = np.stack(self.camera_configs.values())
+        cfg[self.step_counter] = action
+        self.reset_cameras(cfg)
 
         # update pedestrian bbox from each camera view
         for i, pedestrian in enumerate(self.pedestrians):
             actor = self.world.get_actor(pedestrian)
             self.pedestrian_gts[i]["views"][self.step_counter] = self.get_pedestrian_view(actor, self.step_counter)
+            # self.pedestrian_gts[i]["views"] = {cam: self.get_pedestrian_view(actor, cam) for cam in range(self.num_cam)}
 
         # Update the state, calculate the reward, and check for termination
         # Set the current observation
         observation = {
-            "images": {self.step_counter: self.render()[self.step_counter]},
-            "camera_configs": {self.step_counter: encode_camera_cfg(self.camera_configs[self.step_counter], self.opts)},
+            "images": self.render(),
+            "camera_configs": {cam: encode_camera_cfg(self.camera_configs[cam], self.opts)
+                               for cam in range(self.num_cam)},
+            "step": self.step_counter
         }
         # Set the reward for the current step
         reward = 0
@@ -442,14 +423,6 @@ class CarlaCameraSeqEnv(gym.Env):
             if p[1] < y_min:
                 y_min = p[1]
 
-        # x_min, y_min, x_min, x_max = float(x_min), float(y_min), float(x_max), float(y_max)
-        # Add the object to the frame (ensure it is inside the image)
-        # if (
-        #         x_min > 1
-        #         and x_max < float(self.opts["cam_x"]) - 2
-        #         and y_min > 1
-        #         and y_max < float(self.opts["cam_y"]) - 2
-        # ):
         if (
                 x_max > 100
                 and x_min < float(self.opts["cam_x"]) - 100
@@ -463,7 +436,7 @@ class CarlaCameraSeqEnv(gym.Env):
 
         return pedestrian_view
 
-    def reset_cameras(self, action=None):
+    def reset_cameras(self, cfg=None):
         # destroy existing cameras
         for camera in self.cameras.values():
             camera.destroy()
@@ -476,16 +449,16 @@ class CarlaCameraSeqEnv(gym.Env):
         camera_bp = self.world.get_blueprint_library().find("sensor.camera.rgb")
         camera_bp.set_attribute("image_size_x", str(self.opts["cam_x"]))
         camera_bp.set_attribute("image_size_y", str(self.opts["cam_y"]))
-        camera_bp.set_attribute("fov", str(self.opts["cam_fov"]))
 
-        if action is None:
-            location = np.array(self.opts["cam_pos_lst"])
-            rotation = np.array(self.opts["cam_dir_lst"])
+        if cfg is None:
+            locations = np.array(self.opts["cam_pos_lst"])
+            rotations = np.array(self.opts["cam_dir_lst"])
+            fovs = float(self.opts["cam_fov"]) * np.ones(self.num_cam)
         else:
-            action = np.array([self.action(act) for act in action])
-            location, rotation = action[:, :3], action[:, 3:6]
+            locations, rotations, fovs = cfg[:, :3], cfg[:, 3:6], cfg[:, 6]
 
-        for cam, (cam_pos, cam_dir) in enumerate(zip(location, rotation)):
+        for cam, (cam_pos, cam_dir, fov) in enumerate(zip(locations, rotations, fovs)):
+            camera_bp.set_attribute("fov", str(fov))
             loc = carla.Location(*cam_pos)
             rot = carla.Rotation(*cam_dir)
             camera_init_trans = carla.Transform(loc, rot)
@@ -541,16 +514,8 @@ def get_camera_config(camera):
         "Cy": Cy,
     }
 
-    # config is consist of 7 elements
-    cam_config = {
-        "x": loc.x,
-        "y": loc.y,
-        "z": loc.z,
-        "pitch": rot.pitch,
-        "roll": rot.roll,
-        "yaw": rot.yaw,
-        "fov": fov,
-    }
+    # config is consist of 7 elements [x, y, z, pitch, yaw, roll, fov]
+    cam_config = [loc.x, loc.y, loc.z, rot.pitch, rot.yaw, rot.roll, fov, ]
 
     _, intrinsic, extrinsic = build_cam(**cam_value)
     return cam_config, intrinsic, extrinsic
@@ -558,12 +523,14 @@ def get_camera_config(camera):
 
 if __name__ == '__main__':
     import json
+    from tqdm import tqdm
 
     with open('cfg/RL/2.cfg', "r") as fp:
         dataset_config = json.load(fp)
 
     env = CarlaCameraSeqEnv(dataset_config)
-    observation, info = env.reset()
-    done = False
-    while not done:
-        observation, reward, done, info = env.step(np.random.rand(dataset_config["num_cam"], 7))
+    for i in tqdm(range(4000)):
+        observation, info = env.reset()
+        done = False
+        while not done:
+            observation, reward, done, info = env.step(np.random.rand(7))
