@@ -243,6 +243,10 @@ class CarlaCameraSeqEnv(gym.Env):
         cfg[self.step_counter] = action
         self.reset_cameras(cfg)
 
+        # wait for two ticks to update the camera actors
+        for i in range(2):
+            self.world.tick()
+
         # update pedestrian bbox from each camera view
         for i, pedestrian in enumerate(self.pedestrians):
             actor = self.world.get_actor(pedestrian)
