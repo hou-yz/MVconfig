@@ -29,7 +29,6 @@ class PerspectiveTrainer(object):
         self.writer = writer
         self.start_time = time.time()
         self.memory_bank = {'obs': [],
-                            'obs_feat': [],
                             'actions': [],
                             'logprobs': [],
                             'rewards': [],
@@ -42,25 +41,24 @@ class PerspectiveTrainer(object):
         B, = next_obs[0].shape
         assert B == 1, 'currently only support batch size of 1 for the envs'
         next_done = False
-        obs_feat = torch.zeros([env.num_cam, self.model.base_dim, *self.model.Rworld_shape])
+        obs_feat = torch.zeros([B, env.num_cam, self.model.base_dim, *self.model.Rworld_shape])
         while not next_done:
             step, configs, imgs, aug_mats, proj_mats = next_obs
-            self.rl_global_step += 1 * B
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
                 feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
-                obs_feat[step] += feat[0, 0].cpu()
-                action, logprob, _, value = self.agent.get_action_and_value((obs_feat[None, :].cuda(), configs, step))
+                obs_feat[0, step] = feat[0, 0].cpu()
+                action, logprob, _, value = self.agent.get_action_and_value((obs_feat.cuda(), configs, step))
             if training:
-                self.memory_bank['obs'].append(next_obs)
+                self.rl_global_step += 1 * B
+                # Markovian if have (obs_feat, configs, step) as state
+                self.memory_bank['obs'].append((copy.deepcopy(obs_feat), configs, step))
                 self.memory_bank['dones'].append(next_done)
-                self.memory_bank['obs_feat'].append(obs_feat)
                 self.memory_bank['actions'].append(action)
                 self.memory_bank['values'].append(value.item())
                 self.memory_bank['logprobs'].append(logprob.item())
 
-            # next_obs, reward, terminated, truncated, infos = env.step(action.cpu().numpy())
             (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame), next_done = \
                 env.step(action.cpu()[0].numpy())
             next_obs = (torch.tensor(step)[None], torch.tensor(configs, dtype=torch.float32)[None, :],
@@ -70,12 +68,12 @@ class PerspectiveTrainer(object):
         step, configs, imgs, aug_mats, proj_mats = next_obs
         with torch.no_grad():
             feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
-            obs_feat[step] += feat[0, 0].cpu()
+            obs_feat[0, step] = feat[0, 0].cpu()
 
         if not training:
             return obs_feat
 
-        rewards, (coverages, task_loss, moda) = self.rl_rewards(env, obs_feat, world_gt, frame)
+        rewards, (coverages, task_loss, moda) = self.rl_rewards(env, obs_feat[0], world_gt, frame)
         # fixed episode length of num_cam - 1 so no need for value bootstrap
         returns, advantages = np.zeros([env.num_cam - 1]), np.zeros([env.num_cam - 1])
         values = np.array(self.memory_bank['values'][-env.num_cam - 1:])
@@ -108,7 +106,8 @@ class PerspectiveTrainer(object):
 
     def rl_rewards(self, env, obs_feat, world_gt, frame):
         # coverage
-        coverages = obs_feat.norm(dim=1).bool().float().mean(dim=[1, 2])
+        cam_coverages = obs_feat.norm(dim=1).bool().float()
+        overall_coverages = torch.stack([cam_coverages[:cam + 1].max(dim=0)[0].mean() for cam in range(env.num_cam)])
         # compute loss & moda based on final result
         # loss
         world_heatmap, world_offset = self.model.get_output(obs_feat[None, :].cuda())
@@ -127,23 +126,24 @@ class PerspectiveTrainer(object):
         moda, modp, precision, recall, stats = evaluateDetection_py(res, env.gt_array, env.frames)
         # use coverage, loss, or MODA as reward
         if self.args.reward == 'cover':
-            rewards = coverages[-(env.num_cam - 1):]
+            # rewards = overall_coverages[-(env.num_cam - 1):] - overall_coverages[:(env.num_cam - 1)]
+            rewards = torch.zeros([env.num_cam - 1])
+            rewards[-1] = overall_coverages[-1]
         elif self.args.reward == 'loss':
-            rewards = torch.zeros([env.num_cam - 1, ])
+            rewards = torch.zeros([env.num_cam - 1])
             rewards[-1] = task_loss
         elif self.args.reward == 'moda':
-            rewards = torch.zeros([env.num_cam - 1, ])
+            rewards = torch.zeros([env.num_cam - 1])
             rewards[-1] = moda / 100
         else:
             raise Exception
 
-        return rewards, (coverages, task_loss, moda)
+        return rewards, (overall_coverages, task_loss, moda)
 
     def train_rl(self, optimizer):
         # flatten the batch
         b_obs = tuple(torch.cat(obs) for obs in tuple(zip(*self.memory_bank['obs'])))
-        b_step, b_configs, b_imgs, b_aug_mats, b_proj_mats = b_obs
-        b_obs_feat = torch.stack(self.memory_bank['obs_feat'])
+        b_obs_feat, b_configs, b_step = b_obs
         b_actions = torch.cat(self.memory_bank['actions'])
         b_logprobs = torch.tensor(self.memory_bank['logprobs'])
         b_advantages = torch.tensor(self.memory_bank['advantages'])
@@ -155,14 +155,13 @@ class PerspectiveTrainer(object):
         clipfracs = []
         for epoch in range(self.args.rl_update_epochs):
             np.random.shuffle(b_inds)
-            for start in range(0, self.args.rl_batch_size, self.args.rl_minibatch_size):
+            for start in range(0, self.args.ppo_steps, self.args.rl_minibatch_size):
                 end = start + self.args.rl_minibatch_size
                 mb_inds = b_inds[start:end]
-                _, newlogprob, entropy, newvalue = \
-                    self.agent.get_action_and_value((b_obs_feat[mb_inds].cuda(),
-                                                     b_configs[mb_inds],
-                                                     b_step[mb_inds]),
-                                                    b_actions[mb_inds])
+                _, newlogprob, entropy, newvalue = self.agent.get_action_and_value((b_obs_feat[mb_inds].cuda(),
+                                                                                    b_configs[mb_inds],
+                                                                                    b_step[mb_inds]),
+                                                                                   b_actions[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds].cuda()
                 ratio = logratio.exp()
 
@@ -214,7 +213,6 @@ class PerspectiveTrainer(object):
 
         # reset memory bank
         self.memory_bank = {'obs': [],
-                            'obs_feat': [],
                             'actions': [],
                             'logprobs': [],
                             'rewards': [],
@@ -248,7 +246,7 @@ class PerspectiveTrainer(object):
                 imgs_gt[key] = imgs_gt[key].flatten(0, 1)
             if self.args.interactive:
                 self.expand_episode(dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats), True)
-                if len(self.memory_bank['obs']) >= self.args.rl_batch_size:
+                if len(self.memory_bank['values']) >= self.args.ppo_steps:
                     self.train_rl(optimizer)
             else:
                 (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = \
@@ -299,12 +297,15 @@ class PerspectiveTrainer(object):
             B, N = imgs_gt['heatmap'].shape[:2]
             with torch.no_grad():
                 if self.args.interactive:
+                    assert B == 1, 'only support batch_size/num_envs == 1'
                     feat = self.expand_episode(dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats))
                 else:
                     feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
-                coverages = feat.norm(dim=1).bool().float().mean(dim=[1, 2])
+                # coverage
+                cam_coverages = feat.norm(dim=2).bool().float()
+                overall_coverages = cam_coverages.max(dim=1)[0].mean().item()
                 world_heatmap, world_offset = self.model.get_output(feat[None, :].cuda())
-            cover_avg += coverages.mean().item()
+            cover_avg += overall_coverages
             loss = focal_loss(world_heatmap, world_gt['heatmap'])
             if self.args.use_mse:
                 loss = F.mse_loss(world_heatmap, world_gt['heatmap'].cuda())
