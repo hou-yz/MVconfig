@@ -46,20 +46,33 @@ class PositionalEncoding(nn.Module):
 
 
 class CamControl(nn.Module):
-    def __init__(self, dataset, hidden_dim):
+    def __init__(self, dataset, hidden_dim, arch='transformer'):
         super().__init__()
-        self.feat_branch = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
-                                         nn.LeakyReLU(),
-                                         nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
-                                         nn.LeakyReLU(),
-                                         nn.AdaptiveAvgPool2d((1, 1)))
-        self.config_branch = nn.Sequential(nn.Linear(dataset.config_dim, hidden_dim), nn.LeakyReLU(),
-                                           nn.Linear(hidden_dim, hidden_dim), nn.LeakyReLU(), )
-        positional_embedding = create_pos_embedding(dataset.num_cam, hidden_dim)
-        self.register_buffer('positional_embedding', positional_embedding)
-
-        self.transformer = nn.TransformerEncoderLayer(hidden_dim, 8, hidden_dim * 4)
-        self.state_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
+        self.arch = arch
+        if arch == 'transformer':
+            # transformer
+            self.feat_branch = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
+                                             nn.LeakyReLU(),
+                                             nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
+                                             nn.LeakyReLU(),
+                                             nn.AdaptiveAvgPool2d((1, 1)))
+            self.config_branch = nn.Sequential(nn.Linear(dataset.config_dim, hidden_dim), nn.LeakyReLU(),
+                                               nn.Linear(hidden_dim, hidden_dim), nn.LeakyReLU(), )
+            positional_embedding = create_pos_embedding(dataset.num_cam, hidden_dim)
+            self.register_buffer('positional_embedding', positional_embedding)
+            # CHECK: batch_first=True for transformer
+            self.transformer = nn.TransformerEncoderLayer(hidden_dim, 8, hidden_dim * 4, batch_first=True)
+            self.state_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
+        else:
+            # conv + fc only
+            self.feat_branch = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
+                                             nn.LeakyReLU(),
+                                             nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
+                                             nn.LeakyReLU(),
+                                             nn.AdaptiveAvgPool2d((1, 1)))
+            self.config_branch = nn.Sequential(nn.Linear(dataset.config_dim * dataset.num_cam, hidden_dim),
+                                               nn.LeakyReLU(),
+                                               nn.Linear(hidden_dim, hidden_dim), nn.LeakyReLU(), )
 
         self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
                                     layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
@@ -67,24 +80,36 @@ class CamControl(nn.Module):
         self.actor_mean = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
                                         layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
                                         layer_init(nn.Linear(hidden_dim, dataset.action_dim), std=0.01))
-        self.actor_logstd = nn.Parameter(torch.zeros(1, dataset.action_dim))
+        self.actor_logstd = nn.Parameter(torch.ones(1, dataset.action_dim) * np.log(0.1))
 
     def get_value(self, state):
         return self.critic(state)
 
     def get_action_and_value(self, state, action=None):
-        feat, config, step = state
+        feat, configs, step = state
         B, N, C, H, W = feat.shape
-        x_feat = self.feat_branch(feat.flatten(0, 1))[:, :, 0, 0].unflatten(0, [B, N])
-        x_config = self.config_branch(config.to(feat.device).flatten(0, 1)).unflatten(0, [B, N])
+        padding_mask = torch.arange(N).repeat([B, 1]) > step[:, None]
 
-        x = x_feat + x_config + self.positional_embedding[None, :N]
-        batch_state_token = self.state_token.expand(B, -1, -1)
-        x = torch.cat([batch_state_token, x], dim=1)
-        x = self.transformer(x)
-        # Classifier "token" as used by standard language architectures
-        x = x[:, 0]
+        if self.arch == 'transformer':
+            # transformer
+            x_feat = self.feat_branch(feat.flatten(0, 1))[:, :, 0, 0].unflatten(0, [B, N])
+            x_config = self.config_branch(configs.to(feat.device).flatten(0, 1)).unflatten(0, [B, N])
+            # CHECK: batch_first=True for transformer
+            x = x_feat + x_config + self.positional_embedding[None, :N]
+            batch_state_token = self.state_token.expand(B, -1, -1)
+            x = torch.cat([batch_state_token, x], dim=1)
+            ext_padding_mask = torch.cat([torch.zeros([B, 1]), padding_mask], dim=1).bool().to(feat.device)
+            # nn.MultiheadAttention requires *binary* mask=True for locations that we do not want to attend
+            x = self.transformer(x, src_key_padding_mask=ext_padding_mask)
+            # Classifier "token" as used by standard language architectures
+            x = x[:, 0]
+        else:
+            # conv + fc only
+            x_feat = self.feat_branch(feat.max(dim=1)[0])[:, :, 0, 0]
+            x_config = self.config_branch(configs.to(feat.device).flatten(1, 2))
+            x = x_feat + x_config
 
+        # output head
         action_mean = self.actor_mean(x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
