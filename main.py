@@ -98,11 +98,10 @@ def main(args):
                              pin_memory=True, worker_init_fn=seed_worker)
 
     # logging
-    lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
-                  f'control{args.control_lr}' if args.interactive else ''
-    logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_' \
-             f'{"RL_" if args.interactive else ""}' \
-             f'lr{args.lr}{lr_settings}_b{args.batch_size}_e{args.epochs}_dropcam{args.dropcam}_' \
+    RL_settings = f'RL_{args.control_arch}_steps{args.ppo_steps}_b{args.rl_minibatch_size}_' + \
+                  f'lr{args.control_lr}_e{args.rl_update_epochs}_' if args.interactive else ''
+    logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{RL_settings}' \
+             f'TASK_{args.arch}_{args.aggregation}_lr{args.lr}_b{args.batch_size}_e{args.epochs}_' \
              f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
         else f'logs/{args.dataset}/EVAL_{args.resume}'
     os.makedirs(logdir, exist_ok=True)
@@ -118,7 +117,7 @@ def main(args):
 
     # model
     model = MVDet(train_set, args.arch, args.aggregation,
-                  args.use_bottleneck, args.hidden_dim, args.outfeat_dim).cuda()
+                  args.use_bottleneck, args.hidden_dim, args.outfeat_dim, args.control_arch).cuda()
 
     # load checkpoint
     if args.interactive:
@@ -178,6 +177,8 @@ def main(args):
 
     # learn
     if not args.eval:
+        if not is_debug:
+            trainer.test(test_loader)
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
             train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler)
@@ -225,20 +226,21 @@ if __name__ == '__main__':
     parser.add_argument('--deterministic', type=str2bool, default=False)
     # MVcontrol settings
     parser.add_argument('--interactive', action='store_true')
+    parser.add_argument('--control_arch', default='conv', choices=['conv', 'transformer'])
     # RL arguments
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
     parser.add_argument("--reward", default='cover', choices=['cover', 'loss', 'moda'])
-    parser.add_argument("--gae", action='store_true',
-                        help="Use GAE for advantage computation")
-    parser.add_argument("--gae_lambda", type=float, default=0.95,
-                        help="the lambda for the general advantage estimation")
-    parser.add_argument("--rl_batch_size", type=int, default=256,
+    parser.add_argument("--ppo_steps", type=int, default=256,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
     parser.add_argument("--rl_minibatch_size", type=int, default=32,
                         help="RL mini-batches, default: 64")
-    parser.add_argument("--rl_update_epochs", type=int, default=10,
-                        help="the K epochs to update the policy")
-    parser.add_argument('--gamma', type=float, default=0.99, help='reward discount factor (default: 0.99)')
+    parser.add_argument("--rl_update_epochs", type=int, default=5,
+                        help="the K epochs to update the policy, default: 10")
+    parser.add_argument('--gamma', type=float, default=0.99, help='reward discount factor, default: 0.99')
+    parser.add_argument("--gae", type=str2bool, default=True,
+                        help="Use GAE for advantage computation")
+    parser.add_argument("--gae_lambda", type=float, default=0.95,
+                        help="the lambda for the general advantage estimation")
     parser.add_argument("--rl_norm_adv", type=str2bool, default=True,
                         help="Toggles advantages normalization")
     parser.add_argument("--rl_clip_coef", type=float, default=0.2,
