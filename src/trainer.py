@@ -101,6 +101,9 @@ class PerspectiveTrainer(object):
 
         self.writer.add_scalar("charts/episodic_return", rewards.sum().item(), self.rl_global_step)
         self.writer.add_scalar("charts/episodic_length", step.item(), self.rl_global_step)
+        self.writer.add_scalar("charts/coverage", coverages[-1].item(), self.rl_global_step)
+        self.writer.add_scalar("charts/loss", task_loss, self.rl_global_step)
+        self.writer.add_scalar("charts/moda", moda, self.rl_global_step)
 
         return coverages, task_loss, moda
 
@@ -123,22 +126,18 @@ class PerspectiveTrainer(object):
         pos, s = positions[0, ids], scores[0, ids, 0]
         ids, count = nms(pos, s, 20, np.inf)
         res = torch.cat([torch.ones([count, 1]) * frame, pos[ids[:count]]], dim=1)
-        moda, modp, precision, recall, stats = evaluateDetection_py(res, env.gt_array, env.frames)
+        moda, modp, precision, recall, stats = evaluateDetection_py(res, env.gt_array, [frame])
         # use coverage, loss, or MODA as reward
-        if self.args.reward == 'cover':
+        rewards = torch.zeros([env.num_cam - 1])
+        if 'cover' in self.args.reward:
             # rewards = overall_coverages[-(env.num_cam - 1):] - overall_coverages[:(env.num_cam - 1)]
-            rewards = torch.zeros([env.num_cam - 1])
-            rewards[-1] = overall_coverages[-1]
-        elif self.args.reward == 'loss':
-            rewards = torch.zeros([env.num_cam - 1])
-            rewards[-1] = task_loss
-        elif self.args.reward == 'moda':
-            rewards = torch.zeros([env.num_cam - 1])
-            rewards[-1] = moda / 100
-        else:
-            raise Exception
+            rewards[-1] += overall_coverages[-1]
+        if 'loss' in self.args.reward:
+            rewards[-1] += task_loss
+        if 'moda' in self.args.reward:
+            rewards[-1] += moda / 100
 
-        return rewards, (overall_coverages, task_loss, moda)
+        return rewards, (overall_coverages, task_loss.item(), moda)
 
     def train_rl(self, optimizer):
         # flatten the batch
@@ -230,8 +229,8 @@ class PerspectiveTrainer(object):
         self.writer.add_scalar("losses/approx_kl", approx_kl.item(), self.rl_global_step)
         self.writer.add_scalar("losses/clipfrac", np.mean(clipfracs), self.rl_global_step)
         self.writer.add_scalar("losses/explained_variance", explained_var, self.rl_global_step)
-        self.writer.add_scalar("charts/SPS", int(self.rl_global_step / (time.time() - self.start_time)),
-                               self.rl_global_step)
+        # self.writer.add_scalar("charts/SPS", int(self.rl_global_step / (time.time() - self.start_time)),
+        #                        self.rl_global_step)
         print(f'v loss: {v_loss.item():.3f}, p loss: {pg_loss.item():.3f}, avg return: {b_returns.mean().item():.3f}')
 
     def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=100):
@@ -304,7 +303,7 @@ class PerspectiveTrainer(object):
                 # coverage
                 cam_coverages = feat.norm(dim=2).bool().float()
                 overall_coverages = cam_coverages.max(dim=1)[0].mean().item()
-                world_heatmap, world_offset = self.model.get_output(feat[None, :].cuda())
+                world_heatmap, world_offset = self.model.get_output(feat.cuda())
             cover_avg += overall_coverages
             loss = focal_loss(world_heatmap, world_gt['heatmap'])
             if self.args.use_mse:

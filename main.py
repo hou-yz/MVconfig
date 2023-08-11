@@ -135,8 +135,9 @@ def main(args):
                         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
                                                                  for key, value in vars(args).items()])))
     else:
-        with open(f'logs/{args.dataset}/{args.arch}_.txt', 'w') as fp:
-            fp.write(logdir)
+        if not args.eval:
+            with open(f'logs/{args.dataset}/{args.arch}_.txt', 'w') as fp:
+                fp.write(logdir)
 
         writer = None
 
@@ -229,7 +230,7 @@ if __name__ == '__main__':
     parser.add_argument('--control_arch', default='conv', choices=['conv', 'transformer'])
     # RL arguments
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
-    parser.add_argument("--reward", default='cover', choices=['cover', 'loss', 'moda'])
+    parser.add_argument("--reward", default='cover+moda')  # choices=['cover', 'loss', 'moda']
     parser.add_argument("--ppo_steps", type=int, default=256,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
     parser.add_argument("--rl_minibatch_size", type=int, default=32,
