@@ -118,7 +118,7 @@ class CarlaCameraSeqEnv(gym.Env):
     The CARLA environment for single-camera multi-frame pedestrian detection
     """
 
-    def __init__(self, opts, seed=None, host="127.0.0.1", port=2000):
+    def __init__(self, opts, seed=None, host="127.0.0.1", port=2000, tm_port=8000):
         self.opts = opts
 
         # if seed is provided, set seed to generators
@@ -163,7 +163,7 @@ class CarlaCameraSeqEnv(gym.Env):
 
         # Define any other attributes or variables needed for your environment
         # turn on sync mode
-        traffic_manager = self.client.get_trafficmanager(8000)
+        traffic_manager = self.client.get_trafficmanager(tm_port)
         settings = self.world.get_settings()
         traffic_manager.set_synchronous_mode(True)
         settings.synchronous_mode = True

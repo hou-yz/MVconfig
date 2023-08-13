@@ -9,14 +9,14 @@ from src.environment.carla_gym_seq import CarlaCameraSeqEnv
 
 
 class CarlaX(VisionDataset):
-    def __init__(self, opts, seed=None, root=os.path.expanduser("~/Data/CarlaX")):
+    def __init__(self, opts, seed=None, root=os.path.expanduser("~/Data/CarlaX"), port=2000, tm_port=8000):
         os.makedirs(root, exist_ok=True)
         super().__init__(root)
         # image of shape C,H,W (C,N_row,N_col); xy indexging; x,y (w,h) (n_col,n_row)
         # CarlaX has xy-indexing
         # CarlaX has consistent unit: meter (m) for calibration & pos annotation
         self.__name__ = 'CarlaX'
-        self.env = CarlaCameraSeqEnv(opts, seed)
+        self.env = CarlaCameraSeqEnv(opts, seed, port=port, tm_port=tm_port)
         self.img_shape = [opts["cam_y"], opts["cam_x"]]  # H,W 
         x_min, x_max, y_min, y_max, _, _ = opts["spawn_area"]
         # annotation accuracy of 2.5 cm, opts["map_expand"] = 40

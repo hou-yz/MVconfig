@@ -55,7 +55,7 @@ def main(args):
     if args.dataset == 'carlax':
         with open('./cfg/RL/1.cfg', "r") as fp:
             dataset_config = json.load(fp)
-        base = CarlaX(dataset_config, args.carla_seed)
+        base = CarlaX(dataset_config, args.carla_seed, port=args.carla_port, tm_port=args.carla_tm_port)
         args.num_workers = 0
         args.batch_size = 1
     else:
@@ -156,6 +156,12 @@ def main(args):
                     "lr": args.lr * args.base_lr_ratio, } if not args.interactive else {"params": [], "lr": 0},
                    {"params": [p for n, p in model.named_parameters() if 'control' in n and p.requires_grad],
                     "lr": args.control_lr, }, ]
+                   # {"params": [p for n, p in model.named_parameters()
+                   #             if 'control' in n and 'logstd' not in n and p.requires_grad],
+                   #  "lr": args.control_lr, },
+                   # {"params": [p for n, p in model.named_parameters()
+                   #             if 'control' in n and 'logstd' in n and p.requires_grad],
+                   #  "lr": args.control_lr * 10, },
     optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
     def warmup_lr_scheduler(epoch, warmup_epochs=0.1 * args.epochs):
@@ -164,8 +170,7 @@ def main(args):
         else:
             return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
 
-    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
-    scheduler = None
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler) if not args.interactive else None
 
     trainer = PerspectiveTrainer(model, logdir, writer, args)
 
@@ -228,9 +233,12 @@ if __name__ == '__main__':
     # MVcontrol settings
     parser.add_argument('--interactive', action='store_true')
     parser.add_argument('--control_arch', default='conv', choices=['conv', 'transformer'])
+    parser.add_argument('--rl_deterministic', type=str2bool, default=False)
+    parser.add_argument('--carla_port', type=int, default=2000)
+    parser.add_argument('--carla_tm_port', type=int, default=8000)
     # RL arguments
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
-    parser.add_argument("--reward", default='cover+moda')  # choices=['cover', 'loss', 'moda']
+    parser.add_argument("--reward", default='cover')  # choices=['cover', 'loss', 'moda']
     parser.add_argument("--ppo_steps", type=int, default=256,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
     parser.add_argument("--rl_minibatch_size", type=int, default=32,
