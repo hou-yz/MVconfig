@@ -98,11 +98,12 @@ def main(args):
                              pin_memory=True, worker_init_fn=seed_worker)
 
     # logging
-    RL_settings = f'RL_{args.control_arch}_steps{args.ppo_steps}_b{args.rl_minibatch_size}_' + \
-                  f'lr{args.control_lr}_e{args.rl_update_epochs}_' if args.interactive else ''
+    RL_settings = f'RL_{args.control_arch}_steps{args.ppo_steps}_b{args.rl_minibatch_size}_' \
+                  f'lr{args.control_lr}_stdlr{args.logstd_lr}_e{args.rl_update_epochs}_' \
+                  f'{"deterministic_" if args.rl_deterministic else ""}' \
+                  f'' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{RL_settings}' \
-             f'TASK_{args.arch}_{args.aggregation}_lr{args.lr}_b{args.batch_size}_e{args.epochs}_' \
-             f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
+             f'TASK_{args.aggregation}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
         else f'logs/{args.dataset}/EVAL_{args.resume}'
     os.makedirs(logdir, exist_ok=True)
     copy_tree('src', logdir + '/scripts/src')
@@ -154,14 +155,12 @@ def main(args):
                     "lr": args.lr * args.other_lr_ratio, } if not args.interactive else {"params": [], "lr": 0},
                    {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
                     "lr": args.lr * args.base_lr_ratio, } if not args.interactive else {"params": [], "lr": 0},
-                   {"params": [p for n, p in model.named_parameters() if 'control' in n and p.requires_grad],
-                    "lr": args.control_lr, }, ]
-                   # {"params": [p for n, p in model.named_parameters()
-                   #             if 'control' in n and 'logstd' not in n and p.requires_grad],
-                   #  "lr": args.control_lr, },
-                   # {"params": [p for n, p in model.named_parameters()
-                   #             if 'control' in n and 'logstd' in n and p.requires_grad],
-                   #  "lr": args.control_lr * 10, },
+                   {"params": [p for n, p in model.named_parameters()
+                               if 'control' in n and 'logstd' not in n and p.requires_grad],
+                    "lr": args.control_lr, },
+                   {"params": [p for n, p in model.named_parameters()
+                               if 'control' in n and 'logstd' in n and p.requires_grad],
+                    "lr": args.logstd_lr, }, ]
     optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
     def warmup_lr_scheduler(epoch, warmup_epochs=0.1 * args.epochs):
@@ -238,6 +237,7 @@ if __name__ == '__main__':
     parser.add_argument('--carla_tm_port', type=int, default=8000)
     # RL arguments
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
+    parser.add_argument('--logstd_lr', type=float, default=1e-2, help='learning rate for logstd')
     parser.add_argument("--reward", default='cover')  # choices=['cover', 'loss', 'moda']
     parser.add_argument("--ppo_steps", type=int, default=256,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
