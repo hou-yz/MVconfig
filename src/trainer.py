@@ -1,3 +1,4 @@
+import io
 import itertools
 import random
 import time
@@ -37,7 +38,7 @@ class PerspectiveTrainer(object):
                             'returns': [],
                             'advantages': []}
 
-    def expand_episode(self, env, next_obs, training=False):
+    def expand_episode(self, env, next_obs, training=False, visualize=False):
         B, = next_obs[0].shape
         assert B == 1, 'currently only support batch size of 1 for the envs'
         next_done = False
@@ -49,11 +50,13 @@ class PerspectiveTrainer(object):
             with torch.no_grad():
                 feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
                 obs_feat[0, step] = feat[0, 0].cpu()
-                action, logprob, _, value = self.agent.get_action_and_value((obs_feat.cuda(), configs, step))
+                action, logprob, _, value = self.agent.get_action_and_value(
+                    (obs_feat.cuda(), configs, step), deterministic=self.args.rl_deterministic and not training)
             if training:
                 self.rl_global_step += 1 * B
                 # Markovian if have (obs_feat, configs, step) as state
-                self.memory_bank['obs'].append((copy.deepcopy(obs_feat), configs, step))
+                # only store feat for one cam to save memory
+                self.memory_bank['obs'].append((feat[:, 0].cpu(), configs, step))
                 self.memory_bank['dones'].append(next_done)
                 self.memory_bank['actions'].append(action)
                 self.memory_bank['values'].append(value.item())
@@ -70,7 +73,26 @@ class PerspectiveTrainer(object):
             feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
             obs_feat[0, step] = feat[0, 0].cpu()
 
+        # visualize
+        def cover_visualize():
+            cover_map = obs_feat[0].norm(dim=1).bool().float().mean([0]).cpu()
+            pedestrian_map = world_gt['heatmap'][0]
+            fig = plt.figure()
+            plt.imshow(cover_map + pedestrian_map, vmin=0, vmax=2)
+            # plt.colorbar(ticks=np.arange(env.num_cam + 1))
+            # https://stackoverflow.com/a/7821917/8305276
+            # If we haven't already shown or saved the plot, then we need to
+            # draw the figure first...
+            fig.canvas.draw()
+
+            # Now we can save it to a numpy array.
+            data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+            data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            return data
+
         if not training:
+            if visualize:
+                Image.fromarray(cover_visualize()).save(f'{self.logdir}/cover.png')
             return obs_feat
 
         rewards, (coverages, task_loss, moda) = self.rl_rewards(env, obs_feat[0], world_gt, frame)
@@ -104,6 +126,8 @@ class PerspectiveTrainer(object):
         self.writer.add_scalar("charts/coverage", coverages[-1].item(), self.rl_global_step)
         self.writer.add_scalar("charts/loss", task_loss, self.rl_global_step)
         self.writer.add_scalar("charts/moda", moda, self.rl_global_step)
+        if visualize:
+            self.writer.add_image("images/coverage", cover_visualize(), self.rl_global_step, dataformats='HWC')
 
         return coverages, task_loss, moda
 
@@ -137,12 +161,25 @@ class PerspectiveTrainer(object):
         if 'moda' in self.args.reward:
             rewards[-1] += moda / 100
 
+        # elif self.args.reward == "cover+moda":
+        #     # option 4: use (coverage + MODA) as the reward
+        #     world_coverage = dataset.Rworld_coverage[step].mean(-1).mean(-1)
+        #     res_list = self.bev_prediction(world_heatmap, world_offset, dataset, frame)
+        #     res = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
+        #     # only evaluate stats for the current frame
+        #     moda, modp, precision, recall, stats = evaluateDetection_py(res, dataset.gt_array)
+        #     moda = torch.tensor([moda / 100]).cuda()
+        #     reward = world_coverage.cuda() + moda - self.last_reward
+        #     # set current `moda` as last_reward for the next step
+        #     self.last_reward = reward
+
         return rewards, (overall_coverages, task_loss.item(), moda)
 
     def train_rl(self, optimizer):
         # flatten the batch
         b_obs = tuple(torch.cat(obs) for obs in tuple(zip(*self.memory_bank['obs'])))
-        b_obs_feat, b_configs, b_step = b_obs
+        # only per camera feature are stored to save memory
+        b_cam_feat, b_configs, b_step = b_obs
         b_actions = torch.cat(self.memory_bank['actions'])
         b_logprobs = torch.tensor(self.memory_bank['logprobs'])
         b_advantages = torch.tensor(self.memory_bank['advantages'])
@@ -150,14 +187,19 @@ class PerspectiveTrainer(object):
         b_values = torch.tensor(self.memory_bank['values'])
 
         # Optimizing the policy and value network
-        b_inds = np.arange(len(b_values))
+        N, C, H, W = b_cam_feat.shape
+        b_obs_inds = torch.stack([(torch.arange(N) - b_step + torch.clamp(b_step, max=step)) * (b_step >= step)
+                                  - torch.ones(N, dtype=torch.long) * (b_step < step)
+                                  for step in range(b_step.max().item() + 2)], dim=1)
+        b_cam_feat = torch.cat([b_cam_feat, torch.zeros([1, C, H, W])])
         clipfracs = []
         for epoch in range(self.args.rl_update_epochs):
-            np.random.shuffle(b_inds)
+            b_inds = torch.randperm(N)
             for start in range(0, self.args.ppo_steps, self.args.rl_minibatch_size):
                 end = start + self.args.rl_minibatch_size
                 mb_inds = b_inds[start:end]
-                _, newlogprob, entropy, newvalue = self.agent.get_action_and_value((b_obs_feat[mb_inds].cuda(),
+                mb_obs_feat = b_cam_feat[b_obs_inds[mb_inds]]
+                _, newlogprob, entropy, newvalue = self.agent.get_action_and_value((mb_obs_feat.cuda(),
                                                                                     b_configs[mb_inds],
                                                                                     b_step[mb_inds]),
                                                                                    b_actions[mb_inds])
@@ -244,7 +286,8 @@ class PerspectiveTrainer(object):
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].flatten(0, 1)
             if self.args.interactive:
-                self.expand_episode(dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats), True)
+                self.expand_episode(dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
+                                    True, visualize=self.rl_global_step % 500 == 0)
                 if len(self.memory_bank['values']) >= self.args.ppo_steps:
                     self.train_rl(optimizer)
             else:
@@ -297,7 +340,8 @@ class PerspectiveTrainer(object):
             with torch.no_grad():
                 if self.args.interactive:
                     assert B == 1, 'only support batch_size/num_envs == 1'
-                    feat = self.expand_episode(dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats))
+                    feat = self.expand_episode(dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
+                                               visualize=(batch_idx == 0))
                 else:
                     feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
                 # coverage
