@@ -21,7 +21,8 @@ QUALITY = ("Epic", "Low")
 SpawnActor = carla.command.SpawnActor
 
 
-def run_carla(carla_path, off_screen=False, quality="Epic", gpu=2):
+#  ./CarlaUE4.sh -RenderOffScreen  -ini:[/Script/Engine.RendererSettings]:r.GraphicsAdapter=0 -carla-rpc-port=2000
+def run_carla(carla_path, off_screen=False, quality="Epic", gpu=2, port=2000):
     assert quality in QUALITY
     script_path = os.path.join(carla_path, "CarlaUE4.sh")
     prompt = f"bash {script_path}"
@@ -30,7 +31,7 @@ def run_carla(carla_path, off_screen=False, quality="Epic", gpu=2):
     prompt += f" -quality-level={quality}"
     if not os.path.exists(script_path):
         raise FileNotFoundError("CarlaUE4.sh file not found")
-    prompt += f" -ini:[/Script/Engine.RendererSettings]:r.GraphicsAdapter={gpu}"
+    prompt += f" -ini:[/Script/Engine.RendererSettings]:r.GraphicsAdapter={gpu} -carla-rpc-port={port}"
     game_proc = subprocess.Popen(prompt, shell=True)
     # wait for carla to start
     time.sleep(5.0)
@@ -170,6 +171,10 @@ class CarlaCameraSeqEnv(gym.Env):
         settings.fixed_delta_seconds = 0.05
         self.world.apply_settings(settings)
 
+        # wait for ticks
+        for _ in range(3):
+            self.world.tick()
+
         # world actors
         self.camera_configs = {}
         self.camera_intrinsics = {}
@@ -243,10 +248,6 @@ class CarlaCameraSeqEnv(gym.Env):
         cfg[self.step_counter] = action
         self.reset_cameras(cfg)
 
-        # wait for two ticks to update the camera actors
-        for i in range(2):
-            self.world.tick()
-
         # update pedestrian bbox from each camera view
         for i, pedestrian in enumerate(self.pedestrians):
             actor = self.world.get_actor(pedestrian)
@@ -298,6 +299,9 @@ class CarlaCameraSeqEnv(gym.Env):
         )
         for camera in self.cameras.values():
             camera.destroy()
+        # wait for ticks
+        for _ in range(3):
+            self.world.tick()
 
     def respawn_pedestrians(self):
         # Destroy existing actors, create new ones randomly
@@ -471,8 +475,9 @@ class CarlaCameraSeqEnv(gym.Env):
             # record camera related information
             self.cameras[cam] = camera
 
-        # wait for one tick to update the camera actors
-        self.world.tick()
+        # wait for three ticks to update the camera actors
+        for _ in range(3):
+            self.world.tick()
 
         for cam, camera in self.cameras.items():
             # save camera configs, rather than projection matrices
