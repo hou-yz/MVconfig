@@ -53,7 +53,7 @@ def main(args):
 
     # dataset
     if args.dataset == 'carlax':
-        with open('./cfg/RL/1.cfg', "r") as fp:
+        with open(f'./cfg/RL/{args.carla_cfg}.cfg', "r") as fp:
             dataset_config = json.load(fp)
         base = CarlaX(dataset_config, args.carla_seed, port=args.carla_port, tm_port=args.carla_tm_port)
         args.num_workers = 0
@@ -98,12 +98,13 @@ def main(args):
                              pin_memory=True, worker_init_fn=seed_worker)
 
     # logging
-    RL_settings = f'RL_{args.control_arch}_steps{args.ppo_steps}_b{args.rl_minibatch_size}_' \
-                  f'lr{args.control_lr}_stdlr{args.logstd_lr}_e{args.rl_update_epochs}_' \
-                  f'{"deterministic_" if args.rl_deterministic else ""}' \
+    RL_settings = f'RL{args.carla_cfg}_{args.reward}_{args.control_arch}_steps{args.ppo_steps}_' \
+                  f'b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
+                  f'stdinit{args.actstd_init}lr{args.actstd_lr}_' \
+                  f'ent{args.ent_coef}_{"deterministic_" if args.rl_deterministic else ""}' \
                   f'' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{RL_settings}' \
-             f'TASK_{args.aggregation}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
+             f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
         else f'logs/{args.dataset}/EVAL_{args.resume}'
     os.makedirs(logdir, exist_ok=True)
     copy_tree('src', logdir + '/scripts/src')
@@ -118,7 +119,7 @@ def main(args):
 
     # model
     model = MVDet(train_set, args.arch, args.aggregation,
-                  args.use_bottleneck, args.hidden_dim, args.outfeat_dim, args.control_arch).cuda()
+                  args.use_bottleneck, args.hidden_dim, args.outfeat_dim, args.control_arch, args.actstd_init).cuda()
 
     # load checkpoint
     if args.interactive:
@@ -160,7 +161,7 @@ def main(args):
                     "lr": args.control_lr, },
                    {"params": [p for n, p in model.named_parameters()
                                if 'control' in n and 'logstd' in n and p.requires_grad],
-                    "lr": args.logstd_lr, }, ]
+                    "lr": args.actstd_lr, }, ]
     optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
     def warmup_lr_scheduler(epoch, warmup_epochs=0.1 * args.epochs):
@@ -187,19 +188,18 @@ def main(args):
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
             train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler)
-            if epoch % max(args.epochs // 10, 1) == 0:
-                print('Testing...')
-                test_loss, test_prec = trainer.test(test_loader)
+            print('Testing...')
+            test_loss, test_prec = trainer.test(test_loader)
 
-                # draw & save
-                x_epoch.append(epoch)
-                train_loss_s.append(train_loss)
-                train_prec_s.append(train_prec)
-                test_loss_s.append(test_loss)
-                test_prec_s.append(test_prec[0])
-                draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s,
-                           train_prec_s, test_prec_s)
-                torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
+            # draw & save
+            x_epoch.append(epoch)
+            train_loss_s.append(train_loss)
+            train_prec_s.append(train_prec)
+            test_loss_s.append(test_loss)
+            test_prec_s.append(test_prec[0])
+            draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s,
+                       train_prec_s, test_prec_s)
+            torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
 
     print('Test loaded model...')
     print(logdir)
@@ -231,14 +231,18 @@ if __name__ == '__main__':
     parser.add_argument('--deterministic', type=str2bool, default=False)
     # MVcontrol settings
     parser.add_argument('--interactive', action='store_true')
+    parser.add_argument('--carla_cfg', type=str, default='1')
     parser.add_argument('--control_arch', default='conv', choices=['conv', 'transformer'])
     parser.add_argument('--rl_deterministic', type=str2bool, default=False)
     parser.add_argument('--carla_port', type=int, default=2000)
     parser.add_argument('--carla_tm_port', type=int, default=8000)
     # RL arguments
-    parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
-    parser.add_argument('--logstd_lr', type=float, default=1e-2, help='learning rate for logstd')
-    parser.add_argument("--reward", default='cover')  # choices=['cover', 'loss', 'moda']
+    parser.add_argument('--control_lr', type=float, default=3e-4, help='learning rate for MVcontrol')
+    parser.add_argument('--actstd_lr', type=float, default=3e-3, help='learning rate for actor std')
+    parser.add_argument('--actstd_init', type=float, default=1.0, help='initial value actor std')
+    parser.add_argument("--reward", default='moda')  # choices=['cover', 'loss', 'moda']
+    # https://www.reddit.com/r/reinforcementlearning/comments/n09ns2/explain_why_ppo_fails_at_this_very_simple_task/
+    # https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
     parser.add_argument("--ppo_steps", type=int, default=256,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
     parser.add_argument("--rl_minibatch_size", type=int, default=32,
@@ -250,19 +254,19 @@ if __name__ == '__main__':
                         help="Use GAE for advantage computation")
     parser.add_argument("--gae_lambda", type=float, default=0.95,
                         help="the lambda for the general advantage estimation")
-    parser.add_argument("--rl_norm_adv", type=str2bool, default=True,
+    parser.add_argument("--norm_adv", type=str2bool, default=True,
                         help="Toggles advantages normalization")
-    parser.add_argument("--rl_clip_coef", type=float, default=0.2,
+    parser.add_argument("--clip_coef", type=float, default=0.2,
                         help="the surrogate clipping coefficient")
-    parser.add_argument("--rl_clip_vloss", type=str2bool, default=True,
+    parser.add_argument("--clip_vloss", type=str2bool, default=True,
                         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
-    parser.add_argument("--rl_ent_coef", type=float, default=0.0,
+    parser.add_argument("--ent_coef", type=float, default=0.0,
                         help="coefficient of the entropy")
-    parser.add_argument("--rl_vf_coef", type=float, default=0.5,
+    parser.add_argument("--vf_coef", type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument("--rl_max_grad_norm", type=float, default=0.5,
+    parser.add_argument("--max_grad_norm", type=float, default=0.5,
                         help="the maximum norm for the gradient clipping")
-    parser.add_argument("--rl_target_kl", type=float, default=None,
+    parser.add_argument("--target_kl", type=float, default=None,
                         help="the target KL divergence threshold")
     # multiview detection specific settings
     parser.add_argument('--reID', action='store_true')

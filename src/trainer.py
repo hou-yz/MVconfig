@@ -32,7 +32,7 @@ class PerspectiveTrainer(object):
         self.memory_bank = {'obs': [],
                             'actions': [],
                             'logprobs': [],
-                            'rewards': [],
+                            # 'rewards': [],
                             'dones': [],
                             'values': [],
                             'returns': [],
@@ -117,7 +117,7 @@ class PerspectiveTrainer(object):
                 returns[-t] = rewards[-t] + self.args.gamma * nextnonterminal * next_return
                 advantages[-t] = returns[-t] - values[-t]
         for t in range(env.num_cam - 1):
-            self.memory_bank['rewards'].append(rewards[t])
+            # self.memory_bank['rewards'].append(rewards[t])
             self.memory_bank['advantages'].append(advantages[t])
             self.memory_bank['returns'].append(returns[t])
 
@@ -136,30 +136,35 @@ class PerspectiveTrainer(object):
         cam_coverages = obs_feat.norm(dim=1).bool().float()
         overall_coverages = torch.stack([cam_coverages[:cam + 1].max(dim=0)[0].mean() for cam in range(env.num_cam)])
         # compute loss & moda based on final result
-        # loss
-        world_heatmap, world_offset = self.model.get_output(obs_feat[None, :].cuda())
-        task_loss = focal_loss(world_heatmap, world_gt['heatmap'][None, :])
-        # MODA
-        xys = mvdet_decode(torch.sigmoid(world_heatmap), world_offset, reduce=env.world_reduce).cpu()
-        grid_xy, scores = xys[:, :, :2], xys[:, :, 2:3]
-        if env.base.indexing == 'xy':
-            positions = grid_xy
-        else:
-            positions = grid_xy[:, :, [1, 0]]
-        ids = scores[0].squeeze() > self.args.cls_thres
-        pos, s = positions[0, ids], scores[0, ids, 0]
-        ids, count = nms(pos, s, 20, np.inf)
-        res = torch.cat([torch.ones([count, 1]) * frame, pos[ids[:count]]], dim=1)
-        moda, modp, precision, recall, stats = evaluateDetection_py(res, env.gt_array, [frame])
+        task_losses = torch.zeros([env.num_cam])
+        modas = torch.zeros([env.num_cam])
+        for cam in range(env.num_cam):
+            world_heatmap, world_offset = self.model.get_output(obs_feat[None, :cam + 1].cuda())
+            # loss
+            task_losses[cam] = focal_loss(world_heatmap, world_gt['heatmap'][None, :])
+            # MODA
+            xys = mvdet_decode(torch.sigmoid(world_heatmap), world_offset, reduce=env.world_reduce).cpu()
+            grid_xy, scores = xys[:, :, :2], xys[:, :, 2:3]
+            if env.base.indexing == 'xy':
+                positions = grid_xy
+            else:
+                positions = grid_xy[:, :, [1, 0]]
+            ids = scores[0].squeeze() > self.args.cls_thres
+            pos, s = positions[0, ids], scores[0, ids, 0]
+            ids, count = nms(pos, s, 20, np.inf)
+            res = torch.cat([torch.ones([count, 1]) * frame, pos[ids[:count]]], dim=1)
+            moda, modp, precision, recall, stats = evaluateDetection_py(res, env.gt_array, [frame])
+            modas[cam] = moda
         # use coverage, loss, or MODA as reward
         rewards = torch.zeros([env.num_cam - 1])
-        if 'cover' in self.args.reward:
-            # rewards = overall_coverages[-(env.num_cam - 1):] - overall_coverages[:(env.num_cam - 1)]
-            rewards[-1] += overall_coverages[-1]
+        if 'maxcover' in self.args.reward:
+            rewards += (overall_coverages[-(env.num_cam - 1):] - overall_coverages[:(env.num_cam - 1)]) * 0.1
+        if 'avgcover' in self.args.reward:
+            rewards += cam_coverages.mean(dim=[1, 2])[-(env.num_cam - 1):] * 0.1
         if 'loss' in self.args.reward:
-            rewards[-1] += task_loss
+            rewards += -task_losses[-(env.num_cam - 1):] + task_losses[:(env.num_cam - 1)]
         if 'moda' in self.args.reward:
-            rewards[-1] += moda / 100
+            rewards += (modas[-(env.num_cam - 1):] - modas[:(env.num_cam - 1)]) / 100
 
         # elif self.args.reward == "cover+moda":
         #     # option 4: use (coverage + MODA) as the reward
@@ -173,36 +178,45 @@ class PerspectiveTrainer(object):
         #     # set current `moda` as last_reward for the next step
         #     self.last_reward = reward
 
-        return rewards, (overall_coverages, task_loss.item(), moda)
+        return rewards, (overall_coverages, task_losses[-1].item(), modas[-1].item())
 
     def train_rl(self, optimizer):
         # flatten the batch
-        b_obs = tuple(torch.cat(obs) for obs in tuple(zip(*self.memory_bank['obs'])))
-        # only per camera feature are stored to save memory
-        b_cam_feat, b_configs, b_step = b_obs
+        b_cam_feat, b_configs, b_step = tuple(torch.cat(obs) for obs in tuple(zip(*self.memory_bank['obs'])))
         b_actions = torch.cat(self.memory_bank['actions'])
         b_logprobs = torch.tensor(self.memory_bank['logprobs'])
         b_advantages = torch.tensor(self.memory_bank['advantages'])
         b_returns = torch.tensor(self.memory_bank['returns'])
         b_values = torch.tensor(self.memory_bank['values'])
 
-        # Optimizing the policy and value network
+        # reset memory bank
+        self.memory_bank = {'obs': [],
+                            'actions': [],
+                            'logprobs': [],
+                            # 'rewards': [],
+                            'dones': [],
+                            'values': [],
+                            'returns': [],
+                            'advantages': []}
+
+        # only per camera feature are stored to save memory
         N, C, H, W = b_cam_feat.shape
-        b_obs_inds = torch.stack([(torch.arange(N) - b_step + torch.clamp(b_step, max=step)) * (b_step >= step)
-                                  - torch.ones(N, dtype=torch.long) * (b_step < step)
-                                  for step in range(b_step.max().item() + 2)], dim=1)
+        b_feat_inds = torch.stack([(torch.arange(N) - b_step + torch.clamp(b_step, max=step)) * (b_step >= step)
+                                   - torch.ones(N, dtype=torch.long) * (b_step < step)
+                                   for step in range(b_step.max().item() + 2)], dim=1)
         b_cam_feat = torch.cat([b_cam_feat, torch.zeros([1, C, H, W])])
         clipfracs = []
+        # Optimizing the policy and value network
         for epoch in range(self.args.rl_update_epochs):
             b_inds = torch.randperm(N)
             for start in range(0, self.args.ppo_steps, self.args.rl_minibatch_size):
                 end = start + self.args.rl_minibatch_size
                 mb_inds = b_inds[start:end]
-                mb_obs_feat = b_cam_feat[b_obs_inds[mb_inds]]
-                _, newlogprob, entropy, newvalue = self.agent.get_action_and_value((mb_obs_feat.cuda(),
-                                                                                    b_configs[mb_inds],
-                                                                                    b_step[mb_inds]),
-                                                                                   b_actions[mb_inds])
+                _, newlogprob, entropy, newvalue = \
+                    self.agent.get_action_and_value((b_cam_feat[b_feat_inds[mb_inds]].cuda(),
+                                                     b_configs[mb_inds],
+                                                     b_step[mb_inds]),
+                                                    b_actions[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds].cuda()
                 ratio = logratio.exp()
 
@@ -210,26 +224,24 @@ class PerspectiveTrainer(object):
                     # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > self.args.rl_clip_coef).float().mean().item()]
+                    clipfracs += [((ratio - 1.0).abs() > self.args.clip_coef).float().mean().item()]
 
                 mb_advantages = b_advantages[mb_inds].cuda()
-                if self.args.rl_norm_adv:
+                if self.args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio,
-                                                        1 - self.args.rl_clip_coef,
-                                                        1 + self.args.rl_clip_coef)
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.args.clip_coef, 1 + self.args.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
                 newvalue = newvalue.view(-1)
-                if self.args.rl_clip_vloss:
+                if self.args.clip_vloss:
                     v_loss_unclipped = (newvalue - b_returns[mb_inds].cuda()) ** 2
                     v_clipped = b_values[mb_inds].cuda() + torch.clamp(newvalue - b_values[mb_inds].cuda(),
-                                                                       -self.args.rl_clip_coef,
-                                                                       self.args.rl_clip_coef, )
+                                                                       -self.args.clip_coef,
+                                                                       self.args.clip_coef, )
                     v_loss_clipped = (v_clipped - b_returns[mb_inds].cuda()) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
@@ -237,30 +249,20 @@ class PerspectiveTrainer(object):
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                loss = pg_loss - self.args.rl_ent_coef * entropy_loss + v_loss * self.args.rl_vf_coef
+                loss = pg_loss - self.args.ent_coef * entropy_loss + v_loss * self.args.vf_coef
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.agent.parameters(), self.args.rl_max_grad_norm)
+                nn.utils.clip_grad_norm_(self.agent.parameters(), self.args.max_grad_norm)
                 optimizer.step()
 
-            if self.args.rl_target_kl is not None:
-                if approx_kl > self.args.rl_target_kl:
+            if self.args.target_kl is not None:
+                if approx_kl > self.args.target_kl:
                     break
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-
-        # reset memory bank
-        self.memory_bank = {'obs': [],
-                            'actions': [],
-                            'logprobs': [],
-                            'rewards': [],
-                            'dones': [],
-                            'values': [],
-                            'returns': [],
-                            'advantages': []}
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         self.writer.add_scalar("charts/learning_rate", optimizer.param_groups[-1]["lr"], self.rl_global_step)
@@ -274,6 +276,8 @@ class PerspectiveTrainer(object):
         # self.writer.add_scalar("charts/SPS", int(self.rl_global_step / (time.time() - self.start_time)),
         #                        self.rl_global_step)
         print(f'v loss: {v_loss.item():.3f}, p loss: {pg_loss.item():.3f}, avg return: {b_returns.mean().item():.3f}')
+
+        del b_cam_feat, b_configs, b_step, b_actions, b_logprobs, b_advantages, b_returns, b_values
 
     def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=100):
         self.model.train()
@@ -376,5 +380,8 @@ class PerspectiveTrainer(object):
         print(f'Test, cover: {cover_avg / len(dataloader):.3f}, loss: {losses / len(dataloader):.6f}, '
               f'moda: {moda:.1f}%, modp: {modp:.1f}%, prec: {precision:.1f}%, recall: {recall:.1f}%, '
               f'time: {time.time() - t0:.1f}s')
+
+        if self.writer is not None:
+            self.writer.add_scalar("results/moda", moda, self.rl_global_step)
 
         return losses / len(dataloader), [moda, modp, precision, recall]
