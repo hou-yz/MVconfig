@@ -284,9 +284,9 @@ class frameDataset(VisionDataset):
             step_counter = None
             img_bboxs, img_pids = zip(*self.imgs_gt[frame].values())
             world_pts, world_pids = self.world_gt[frame]
-        return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids)
+        return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, visualize)
 
-    def step(self, action):
+    def step(self, action, visualize=False):
         observation, reward, done, info = self.base.env.step(action)
 
         # get camera matrices
@@ -304,7 +304,7 @@ class frameDataset(VisionDataset):
         step_counter = observation["step"]
         world_pts, world_lwh, world_pids, img_bboxs, img_pids = self.get_carla_gt_targets(info["pedestrian_gts"])
         world_pts, world_pids = world_pts[:, :2], world_pids
-        return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids), done
+        return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, visualize), done
 
     def prepare_gt(self, imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, visualize=False):
         def plt_visualize():
@@ -404,13 +404,13 @@ if __name__ == '__main__':
     #         pass
     dataloader = DataLoader(dataset, 2, True, num_workers=0)
     t0 = time.time()
-    step, configs, imgs, M, proj_mats, world_gt, imgs_gt, frame = next(iter(dataloader))
+    # _ = next(iter(dataloader))
     for i in range(20):
-        step, configs, imgs, M, proj_mats, world_gt, imgs_gt, frame = dataset.__getitem__(i % len(dataset))
+        _ = dataset.__getitem__(i % len(dataset), visualize=True)
         if dataset.base.__name__ == 'CarlaX' and dataset.interactive:
             done = False
             while not done:
-                (step, configs, imgs, M, proj_mats, world_gt, imgs_gt, frame), done = dataset.step(np.random.rand(7))
+                _, done = dataset.step(np.random.randn(2), visualize=True)
 
     print(time.time() - t0)
     pass
