@@ -32,7 +32,7 @@ def output_head(in_dim, feat_dim, out_dim):
 
 class MVDet(MultiviewBase):
     def __init__(self, dataset, arch='resnet18', aggregation='max',
-                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0, control_arch='conv'):
+                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0, control_arch='conv', actstd_init=1.0):
         super().__init__(dataset, aggregation)
         self.Rimg_shape, self.Rworld_shape = np.array(dataset.Rimg_shape), np.array(dataset.Rworld_shape)
         self.img_reduce = dataset.img_reduce
@@ -67,7 +67,7 @@ class MVDet(MultiviewBase):
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
 
         if dataset.action_dim is not None:
-            self.control_module = CamControl(dataset, self.base_dim, control_arch)
+            self.control_module = CamControl(dataset, self.base_dim, control_arch, actstd_init)
         else:
             self.control_module = None
 
