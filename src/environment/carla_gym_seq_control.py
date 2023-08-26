@@ -172,6 +172,8 @@ class CarlaCameraSeqEnv(gym.Env):
         settings.synchronous_mode = True
         settings.fixed_delta_seconds = 0.05
         self.world.apply_settings(settings)
+        # set how many pedestrians can cross the road
+        self.world.set_pedestrians_cross_factor(100.0)
 
         # world actors
         self.camera_configs = {}
@@ -189,6 +191,7 @@ class CarlaCameraSeqEnv(gym.Env):
         self.camera_bp.set_attribute("image_size_y", str(self.opts["cam_y"]))
         self.camera_bp.set_attribute("fov", str(self.opts["cam_fov"]))
         self.pedestrian_bps = self.world.get_blueprint_library().filter("walker.pedestrian.*")
+        self.walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
 
     def action(self, act):
         # camera config for the next camera
@@ -326,13 +329,15 @@ class CarlaCameraSeqEnv(gym.Env):
         for camera in self.cameras.values():
             camera.destroy()
 
-    def respawn_pedestrians(self, n_chatgroup=4, chatgroup_size=(2, 5), chatgroup_radius=(0.5, 2.0),
+    def respawn_pedestrians(self, n_chatgroup=4, chatgroup_size=(2, 4), chatgroup_radius=(0.5, 1.5),
                             n_walk=15, n_roam=0, percentagePedestriansRunning=0.0, motion=False):
         # Destroy existing actors, create new ones randomly
-        self.client.apply_batch(
-            [carla.command.DestroyActor(pedestrian['id']) for pedestrian in self.pedestrians] +
-            [carla.command.DestroyActor(pedestrian['controller']) for pedestrian in self.pedestrians]
-        )
+        for pedestrian in self.pedestrians:
+            ai_controller = self.world.get_actor(pedestrian['controller'])
+            ai_controller.stop()
+            destroyed_successfully = ai_controller.destroy()
+            actor = self.world.get_actor(pedestrian['id'])
+            destroyed_successfully = actor.destroy()
         self.pedestrians = []
         # spawn parameter, make the spawn area 0.5m smaller
         min_x, max_x = self.opts["spawn_area"][0:2]
@@ -354,7 +359,7 @@ class CarlaCameraSeqEnv(gym.Env):
                 spawn_x = min(max(group_center_x + offset_x, min_x), max_x)
                 spawn_y = min(max(group_center_y + offset_y, min_y), max_y)
                 loc = carla.Location(spawn_x, spawn_y, 1.0)
-                rot = carla.Rotation(0, math.atan2(-offset_x, -offset_y), 0)
+                rot = carla.Rotation(0, math.degrees(math.atan2(-offset_y, -offset_x)), 0)
                 spawn_point = carla.Transform(loc, rot)
                 spawn_points['chat'].append(spawn_point)
         # walk
@@ -407,9 +412,8 @@ class CarlaCameraSeqEnv(gym.Env):
         if motion:
             # 3. we spawn the walker controller
             batch = []
-            walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
             for i in range(len(self.pedestrians)):
-                batch.append(carla.command.SpawnActor(walker_controller_bp, carla.Transform(),
+                batch.append(carla.command.SpawnActor(self.walker_controller_bp, carla.Transform(),
                                                       self.pedestrians[i]['id']))
             results = self.client.apply_batch_sync(batch, True)
             for i in range(len(results)):
@@ -420,20 +424,21 @@ class CarlaCameraSeqEnv(gym.Env):
             self.world.tick()
 
             # 5. initialize each controller and set target to walk to (list is [controler, actor, controller, actor ...])
-            # set how many pedestrians can cross the road
-            self.world.set_pedestrians_cross_factor(0)
             for pedestrian in self.pedestrians:
                 # start walker
-                actor = self.world.get_actor(pedestrian['controller'])
-                actor.start()
-                # set walk to random point
-                destination_x = self.random_generator.uniform(min_x, max_x)
-                destination_y = self.random_generator.uniform(min_y, max_y)
-                destination = carla.Location(destination_x, destination_y, 0.22)
-                # all_actors[i].go_to_location(self.world.get_random_location_from_navigation())
-                actor.go_to_location(destination)
-                # max speed
-                actor.set_max_speed(float(pedestrian['speed']))
+                if pedestrian['type'] != 'chat':
+                    ai_controller = self.world.get_actor(pedestrian['controller'])
+                    ai_controller.start()
+                    # set walk to random point
+                    destination_x = self.random_generator.uniform(min_x, max_x)
+                    destination_y = self.random_generator.uniform(min_y, max_y)
+                    destination = carla.Location(destination_x, destination_y, 0.22)
+                    # all_actors[i].go_to_location(self.world.get_random_location_from_navigation())
+                    ai_controller.go_to_location(destination)
+                    # max speed
+                    ai_controller.set_max_speed(float(pedestrian['speed']))
+        else:
+            self.world.tick()
         pass
 
     def update_pedestrian_gts(self):
