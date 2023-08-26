@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import random
 from operator import itemgetter
 from PIL import Image
 from kornia.geometry import warp_perspective
@@ -68,7 +69,7 @@ class frameDataset(VisionDataset):
     def __init__(self, base, split='train', reID=False, world_reduce=4, img_reduce=12,
                  world_kernel_size=10, img_kernel_size=10,
                  split_ratio=(0.8, 0.1, 0.1), top_k=100, force_download=True, augmentation=False,
-                 interactive=False):
+                 interactive=False, seed=None):
         super().__init__(base.root)
 
         self.base = base
@@ -106,7 +107,9 @@ class frameDataset(VisionDataset):
         self.gt_fname = f'{self.root}/gt.txt'
         if self.base.__name__ == 'CarlaX':
             # generate same pedestrian layout for the same frame
-            self.fixed_seeds = np.random.randint(409600, size=self.num_frame)[frame_range]
+            # random_generator = random.Random(seed)
+            np_random_generator = np.random.default_rng(seed)
+            self.fixed_seeds = np_random_generator.choice(65536, size=self.num_frame, replace=False)[frame_range]
             self.frames = list(frame_range)
             self.world_gt = {}
             self.gt_array = np.array([]).reshape([0, 3])
@@ -376,11 +379,11 @@ if __name__ == '__main__':
     import random
 
     seed = 1
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    # random.seed(seed)
+    # np.random.seed(seed)
+    # torch.manual_seed(seed)
+    # torch.cuda.manual_seed(seed)
+    # torch.cuda.manual_seed_all(seed)
 
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), force_download=True)
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
@@ -389,7 +392,7 @@ if __name__ == '__main__':
     with open('./cfg/RL/1.cfg', "r") as fp:
         dataset_config = json.load(fp)
     # dataset = frameDataset(CarlaX(dataset_config), split_ratio=(0.01, 0.1, 0.1))
-    dataset = frameDataset(CarlaX(dataset_config, seed=seed), split_ratio=(0.01, 0.1, 0.1), interactive=True)
+    dataset = frameDataset(CarlaX(dataset_config, seed=seed), split_ratio=(0.01, 0.1, 0.1), interactive=True, seed=seed)
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train')
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train', semi_supervised=.1)
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', semi_supervised=0.5)

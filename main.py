@@ -71,19 +71,15 @@ def main(args):
     train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
                              img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                              img_kernel_size=args.img_kernel_size, augmentation=args.augmentation,
-                             interactive=args.interactive)
+                             interactive=args.interactive, seed=args.carla_seed)
     val_set = frameDataset(base, split='val', world_reduce=args.world_reduce,
                            img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                            img_kernel_size=args.img_kernel_size,
-                           interactive=args.interactive)
+                           interactive=args.interactive, seed=args.carla_seed)
     test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
                             img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                             img_kernel_size=args.img_kernel_size,
-                            interactive=args.interactive)
-
-    if args.interactive:
-        args.lr /= 5
-        # args.epochs *= 2
+                            interactive=args.interactive, seed=args.carla_seed)
 
     def seed_worker(worker_id):
         worker_seed = torch.initial_seed() % 2 ** 32
@@ -170,7 +166,8 @@ def main(args):
         else:
             return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler) if not args.interactive else None
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler) if not args.interactive \
+        else torch.optim.lr_scheduler.StepLR(optimizer, step_size=20)
 
     trainer = PerspectiveTrainer(model, logdir, writer, args)
 
@@ -188,6 +185,8 @@ def main(args):
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
             train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler)
+            if isinstance(scheduler, torch.optim.lr_scheduler.StepLR):
+                scheduler.step()
             print('Testing...')
             test_loss, test_prec = trainer.test(test_loader)
 
@@ -238,9 +237,10 @@ if __name__ == '__main__':
     parser.add_argument('--carla_tm_port', type=int, default=8000)
     # RL arguments
     parser.add_argument('--control_lr', type=float, default=3e-4, help='learning rate for MVcontrol')
-    parser.add_argument('--actstd_lr', type=float, default=3e-3, help='learning rate for actor std')
+    parser.add_argument('--actstd_lr', type=float, default=1e-2, help='learning rate for actor std')
+    # https://arxiv.org/abs/2006.05990
     parser.add_argument('--actstd_init', type=float, default=1.0, help='initial value actor std')
-    parser.add_argument("--reward", default='moda')  # choices=['cover', 'loss', 'moda']
+    parser.add_argument("--reward", default='moda+maxcover')
     # https://www.reddit.com/r/reinforcementlearning/comments/n09ns2/explain_why_ppo_fails_at_this_very_simple_task/
     # https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
     parser.add_argument("--ppo_steps", type=int, default=256,
