@@ -31,6 +31,9 @@ def main():
             (-9.010857, -41.768852, 0.0),
         ],
         "spawn_count": 25,
+        "n_chatgroup": 0,
+        "n_walk": 25,
+        "motion": False,
         "spawn_area": (191.5, 211.5, -256.85, -236.85, 2, 3),
         "env_action_space": "pitch-yaw",
     }

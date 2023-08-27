@@ -392,7 +392,7 @@ if __name__ == '__main__':
     with open('./cfg/RL/1.cfg', "r") as fp:
         dataset_config = json.load(fp)
     # dataset = frameDataset(CarlaX(dataset_config), split_ratio=(0.01, 0.1, 0.1))
-    dataset = frameDataset(CarlaX(dataset_config, seed=seed), split_ratio=(0.01, 0.1, 0.1), interactive=True, seed=seed)
+    dataset = frameDataset(CarlaX(dataset_config), split_ratio=(0.01, 0.1, 0.1), interactive=True, seed=seed)
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train')
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train', semi_supervised=.1)
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', semi_supervised=0.5)

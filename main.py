@@ -55,7 +55,7 @@ def main(args):
     if args.dataset == 'carlax':
         with open(f'./cfg/RL/{args.carla_cfg}.cfg', "r") as fp:
             dataset_config = json.load(fp)
-        base = CarlaX(dataset_config, args.carla_seed, port=args.carla_port, tm_port=args.carla_tm_port)
+        base = CarlaX(dataset_config, port=args.carla_port, tm_port=args.carla_tm_port)
         args.num_workers = 0
         args.batch_size = 1
     else:
@@ -94,11 +94,10 @@ def main(args):
                              pin_memory=True, worker_init_fn=seed_worker)
 
     # logging
-    RL_settings = f'RL{args.carla_cfg}_{args.reward}_{args.control_arch}_steps{args.ppo_steps}_' \
-                  f'b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
-                  f'stdinit{args.actstd_init}lr{args.actstd_lr}_' \
-                  f'ent{args.ent_coef}_{"deterministic_" if args.rl_deterministic else ""}' \
-                  f'' if args.interactive else ''
+    RL_settings = f'RL_{args.carla_cfg}_{args.reward}_{"C" if args.control_arch == "conv" else "T"}_' \
+                  f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
+                  f'stdinit{args.actstd_init}lr{args.actstd_lr}_ent{args.ent_coef}_' \
+                  f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{RL_settings}' \
              f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
         else f'logs/{args.dataset}/EVAL_{args.resume}'

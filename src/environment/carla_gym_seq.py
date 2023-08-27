@@ -120,13 +120,8 @@ class CarlaCameraSeqEnv(gym.Env):
     The CARLA environment for single-camera multi-frame pedestrian detection
     """
 
-    def __init__(self, opts, seed=None, host="127.0.0.1", port=2000, tm_port=8000):
+    def __init__(self, opts, host="127.0.0.1", port=2000, tm_port=8000):
         self.opts = opts
-
-        # if seed is provided, set seed to generators
-        # otherwise randomly initialise generators
-        self.random_generator = random.Random(seed)
-        self.np_random_generator = np.random.default_rng(seed)
 
         # Connect to the CARLA simulator
         self.client = carla.Client(host, port)
@@ -170,7 +165,7 @@ class CarlaCameraSeqEnv(gym.Env):
         settings = self.world.get_settings()
         self.traffic_manager.set_synchronous_mode(True)
         settings.synchronous_mode = True
-        settings.fixed_delta_seconds = 0.05
+        settings.fixed_delta_seconds = 0.2
         self.world.apply_settings(settings)
         # set how many pedestrians can cross the road
         self.world.set_pedestrians_cross_factor(100.0)
@@ -227,7 +222,8 @@ class CarlaCameraSeqEnv(gym.Env):
         self.np_random_generator = np.random.default_rng(seed)
 
         # Reset the environment to its initial state and return the initial observation
-        self.respawn_pedestrians(motion=motion)
+        self.respawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
+                                 motion=self.opts['motion'])
         self.reset_cameras()
         self.step_counter = 0
 
@@ -463,7 +459,7 @@ class CarlaCameraSeqEnv(gym.Env):
 
             self.pedestrian_gts.append(
                 {
-                    "id": pedestrian,
+                    "id": pedestrian['id'],
                     "x": loc.x,
                     "y": loc.y,
                     "z": ped_z,
