@@ -162,10 +162,10 @@ class CarlaCameraSeqEnv(gym.Env):
         # Define any other attributes or variables needed for your environment
         # turn on sync mode
         self.traffic_manager = self.client.get_trafficmanager(tm_port)
-        settings = self.world.get_settings()
         self.traffic_manager.set_synchronous_mode(True)
+        settings = self.world.get_settings()
         settings.synchronous_mode = True
-        settings.fixed_delta_seconds = 0.2
+        settings.fixed_delta_seconds = 0.05
         self.world.apply_settings(settings)
         # set how many pedestrians can cross the road
         self.world.set_pedestrians_cross_factor(100.0)
@@ -227,6 +227,8 @@ class CarlaCameraSeqEnv(gym.Env):
         self.reset_cameras()
         self.step_counter = 0
 
+        # time.sleep(SLEEP_TIME)
+
         # NOTE: render all cameras by default
         observation = {
             "images": self.render(),
@@ -282,10 +284,11 @@ class CarlaCameraSeqEnv(gym.Env):
                                for cam in range(self.num_cam)},
             "step": self.step_counter
         }
+        self.update_pedestrian_gts()
         # update pedestrian bbox from each camera view
-        for i, pedestrian in enumerate(self.pedestrians):
-            actor = self.world.get_actor(pedestrian['id'])
-            self.pedestrian_gts[i]["views"][self.step_counter] = self.get_pedestrian_view(actor, cam=self.step_counter)
+        # for i, pedestrian in enumerate(self.pedestrians):
+        #     actor = self.world.get_actor(pedestrian['id'])
+        #     self.pedestrian_gts[i]["views"][self.step_counter] = self.get_pedestrian_view(actor, cam=self.step_counter)
 
         # Set the reward for the current step
         reward = 0
@@ -319,19 +322,24 @@ class CarlaCameraSeqEnv(gym.Env):
     def close(self):
         # Clean up any resources or connections
         # after capturing all frames, destroy all actors
-        self.client.apply_batch(
-            [carla.command.DestroyActor(pedestrian['id']) for pedestrian in self.pedestrians]
-        )
+        for pedestrian in self.pedestrians:
+            if 'controller' in pedestrian:
+                ai_controller = self.world.get_actor(pedestrian['controller'])
+                ai_controller.stop()
+                destroyed_successfully = ai_controller.destroy()
+            actor = self.world.get_actor(pedestrian['id'])
+            destroyed_successfully = actor.destroy()
         for camera in self.cameras.values():
             camera.destroy()
 
     def respawn_pedestrians(self, n_chatgroup=4, chatgroup_size=(2, 4), chatgroup_radius=(0.5, 1.5),
-                            n_walk=15, n_roam=0, percentagePedestriansRunning=0.0, motion=False):
+                            n_walk=15, n_roam=0, percentagePedestriansRunning=0.2, motion=False):
         # Destroy existing actors, create new ones randomly
         for pedestrian in self.pedestrians:
-            ai_controller = self.world.get_actor(pedestrian['controller'])
-            ai_controller.stop()
-            destroyed_successfully = ai_controller.destroy()
+            if 'controller' in pedestrian:
+                ai_controller = self.world.get_actor(pedestrian['controller'])
+                ai_controller.stop()
+                destroyed_successfully = ai_controller.destroy()
             actor = self.world.get_actor(pedestrian['id'])
             destroyed_successfully = actor.destroy()
         self.pedestrians = []
@@ -390,10 +398,10 @@ class CarlaCameraSeqEnv(gym.Env):
                 else:
                     if (random.random() > percentagePedestriansRunning):
                         # walking
-                        walker_speed.append(walker_bp.get_attribute('speed').recommended_values[1])
+                        walker_speed.append(float(walker_bp.get_attribute('speed').recommended_values[1]))
                     else:
                         # running
-                        walker_speed.append(walker_bp.get_attribute('speed').recommended_values[2])
+                        walker_speed.append(float(walker_bp.get_attribute('speed').recommended_values[2]))
                 batch.append(carla.command.SpawnActor(walker_bp, spawn_point))
                 types.append(pattern)
         # apply spawn pedestrian
@@ -432,9 +440,9 @@ class CarlaCameraSeqEnv(gym.Env):
                     # all_actors[i].go_to_location(self.world.get_random_location_from_navigation())
                     ai_controller.go_to_location(destination)
                     # max speed
-                    ai_controller.set_max_speed(float(pedestrian['speed']))
-        else:
-            self.world.tick()
+                    ai_controller.set_max_speed(pedestrian['speed'])
+        # else:
+        #     self.world.tick()
         pass
 
     def update_pedestrian_gts(self):
@@ -600,10 +608,13 @@ if __name__ == '__main__':
 
     with open('cfg/RL/1_6dof.cfg', "r") as fp:
         dataset_config = json.load(fp)
+    # dataset_config['motion'] = True
+    # dataset_config['n_chatgroup'] = 4
 
     env = CarlaCameraSeqEnv(dataset_config, port=2100, tm_port=8100)
+    done = False
     for i in tqdm(range(400 * 100)):
         observation, info = env.reset(motion=True)
-        done = False
         while not done:
             observation, reward, done, info = env.step(np.random.rand(7))
+        done = False
