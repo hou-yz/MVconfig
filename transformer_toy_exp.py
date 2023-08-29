@@ -37,7 +37,7 @@ class Counter(nn.Module):
             self.positional_embedding = create_pos_embedding(num_cam, hidden_dim)
             # CHECK: batch_first=True for transformer
             self.transformer = nn.TransformerEncoderLayer(hidden_dim, 8, hidden_dim * 4, batch_first=True)
-            self.state_token = nn.Parameter(torch.randn(num_cam, hidden_dim))
+            self.state_token = nn.Parameter(torch.randn(hidden_dim))
         self.output_head = nn.Linear(hidden_dim, num_cam)
 
     def forward(self, configs, step):
@@ -45,7 +45,7 @@ class Counter(nn.Module):
         if self.arch == 'transformer':
             x_config = self.config_branch(configs.flatten(0, 1)).unflatten(0, [B, N])
             x = x_config + self.positional_embedding.to(configs.device)
-            x = torch.cat([self.state_token[step][:, None], x], dim=1)
+            x = torch.cat([self.state_token.repeat([B, 1, 1]), x], dim=1)
             x = self.transformer(x)
             # Classifier "token" as used by standard language architectures
             x = x[:, 0]
@@ -75,3 +75,8 @@ if __name__ == '__main__':
 
             train_loss += loss.item()
         print(f'{train_loss:.5f}')
+
+    # loss
+    # fc: 14.18504 -> 0.05645
+    # transformer v0 (encoder + prefix multi-query): 6.12997 -> 0.02429
+    # transformer v1 (encoder + prefix same query): 15.10486 -> 0.17619
