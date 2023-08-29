@@ -1,9 +1,10 @@
+import time
+import math
 import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.distributions import Categorical, Normal
-import math
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -40,8 +41,11 @@ class CamControl(nn.Module):
             # transformer
             self.positional_embedding = create_pos_embedding(dataset.num_cam, hidden_dim)
             # CHECK: batch_first=True for transformer
-            self.transformer = nn.TransformerEncoderLayer(hidden_dim, 8, hidden_dim * 4, batch_first=True)
-            self.state_token = nn.Parameter(torch.randn(hidden_dim))
+            # NOTE: by default nn.Transformer() has enable_nested_tensor=True in its nn.TransformerEncoder(),
+            # which can cause `src` to change from [B, 4, C] into [B, 1<=n<=3, C] when given `src_key_padding_mask`,
+            # raising error for nn.TransformerDecoder()
+            self.transformer = nn.Transformer(hidden_dim, 8, 2, 2, hidden_dim * 4, batch_first=True)
+            self.state_token = nn.Parameter(torch.randn(dataset.num_cam, hidden_dim))
 
         self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
                                     layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
@@ -62,15 +66,11 @@ class CamControl(nn.Module):
             # transformer
             x_feat = self.feat_branch(feat.flatten(0, 1)).unflatten(0, [B, N])
             x_config = self.config_branch(configs.flatten(0, 1).to(feat.device)).unflatten(0, [B, N])
+            x = x_feat + x_config + self.positional_embedding.to(feat.device)
+            query = self.state_token[step, None]
             # CHECK: batch_first=True for transformer
-            token_location = (torch.arange(N).repeat([B, 1]) == step[:, None] + 1)
-            x = x_feat + x_config
-            x[token_location] = self.state_token.to(feat.device)
-            x += self.positional_embedding[None, :N].to(feat.device)
-            mask = (torch.arange(N).repeat([B, 1]) > step[:, None] + 1).to(feat.device)
-            x = self.transformer(x, src_key_padding_mask=mask)
-            # Classifier "token" as used by standard language architectures
-            x = x[token_location]
+            x = self.transformer(x, query)
+            x = x[:, 0]
         else:
             # conv + fc only
             x_feat = self.feat_branch(feat.max(dim=1)[0])
@@ -91,6 +91,7 @@ class CamControl(nn.Module):
 
 
 if __name__ == '__main__':
+    import tqdm
     from torchvision.models import vit_b_16
     from torchvision.models import vgg16, alexnet
 
@@ -99,13 +100,25 @@ if __name__ == '__main__':
         pass
 
 
-    B, N, C, H, W = 8, 4, 128, 200, 200
+    B, N, C, H, W = 32, 4, 128, 200, 200
     dataset = Object()
     dataset.config_dim = 7
     dataset.action_dim = 2
     dataset.num_cam = 4
 
-    model = CamControl(dataset, C, )
+    model = CamControl(dataset, C, ).cuda()
+    # model.eval()
 
-    state = (torch.randn([B, N, C, H, W]), torch.randn([B, N, dataset.config_dim]), torch.randint(0, N - 1, [B]))
-    model.get_action_and_value(state)
+    state = (torch.randn([B, N, C, H, W]).cuda(), torch.randn([B, N, dataset.config_dim]), torch.randint(0, N - 1, [B]))
+    t0 = time.time()
+    for _ in tqdm.tqdm(range(10)):
+        # with torch.no_grad():
+        model.get_action_and_value(state)
+    print(time.time() - t0)
+
+    # tgt = torch.randn([B, 1, C])
+    # memory = torch.randn([B, N, C])
+    # # transformer = nn.TransformerDecoderLayer(C, 8, C * 4, batch_first=True)
+    # transformer = nn.Transformer(C, 8, 2, 2, C * 4, batch_first=True)
+    # for _ in tqdm.tqdm(range(100)):
+    #     transformer(tgt, memory)
