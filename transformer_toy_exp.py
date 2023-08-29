@@ -37,7 +37,7 @@ class Counter(nn.Module):
             # transformer
             self.positional_embedding = create_pos_embedding(num_cam, hidden_dim)
             # CHECK: batch_first=True for transformer
-            self.transformer = nn.TransformerEncoderLayer(hidden_dim, 8, hidden_dim * 4, batch_first=True)
+            self.transformer = nn.Transformer(hidden_dim, 8, 2, 2, hidden_dim * 4, batch_first=True)
             self.state_token = nn.Parameter(torch.randn(num_cam, hidden_dim))
         self.output_head = nn.Linear(hidden_dim, num_cam)
 
@@ -45,13 +45,13 @@ class Counter(nn.Module):
         B, N, C = configs.shape
         if self.arch == 'transformer':
             x = self.config_branch(configs.flatten(0, 1)).unflatten(0, [B, N])
-            token_location = (torch.arange(N).repeat(B, 1) == step[:, None] + 1)
-            x[token_location] = self.state_token[step]
-            x += self.positional_embedding.to(configs.device)
-            mask = torch.arange(0, N).repeat([B, 1]) > step[:, None] + 1
-            x = self.transformer(x, src_key_padding_mask=mask)
-            # Classifier "token" as used by standard language architectures
-            x = x[token_location]
+            # mask out future steps
+            # mask = (torch.arange(N).repeat([B, 1]) > step[:, None])
+            # x[mask] = 0
+            x += self.positional_embedding
+            query = self.state_token[step, None]
+            x = self.transformer(x, query, src_key_padding_mask=None, memory_key_padding_mask=None)
+            x = x[:, 0]
         else:
             x = self.config_branch(configs.flatten(1, 2))
         out = self.output_head(x)
@@ -89,9 +89,16 @@ if __name__ == '__main__':
 
     # loss
     # fc: 15.75898 -> 0.06424
-    # transformer v0.0 (encoder + prefix + multi query): 7.04339 -> 0.03376
-    # transformer v0.0.1 (encoder + prefix + multi query + mask): 6.89566 -> 0.03512
-    # transformer v0.1 (encoder + prefix + same query): 13.48105 -> 0.16533
-    # transformer v0.1.1 (encoder + prefix + same query + mask): 13.02086 -> 0.09835
-    # transformer v1.0 (encoder + in-place + multi query): 7.02461 -> 0.03238
-    # transformer v1.1 (encoder + in-place + same query): 11.73027 -> 0.06264
+    # transformer v0.0 (encoder + prefix + multi token): 7.04339 -> 0.03376
+    # transformer v0.0.1 (encoder + prefix + multi token + mask): 6.89566 -> 0.03512
+    # transformer v0.1 (encoder + prefix + same token): 13.48105 -> 0.16533
+    # transformer v0.1.1 (encoder + prefix + same token + mask): 13.02086 -> 0.09835
+    # transformer v1.0 (encoder + in-place + multi token): 7.02257 -> 0.03102
+    # transformer v1.0.1 (encoder + in-place + multi token + mask): 7.02461 -> 0.03238
+    # transformer v1.1 (encoder + in-place + same token): 11.66371 -> 0.03283
+    # transformer v1.1.1 (encoder + in-place + same token + mask): 11.73027 -> 0.06264
+    # transformer v2.0 (full transformer + multi token): 3.48481 -> 0.02469
+    # transformer v2.0.0.5 (full transformer + multi token + put 0 to masked location): 3.77019 -> 0.02691
+    # transformer v2.0.1 (full transformer + multi token + mask): 3.99520 -> 0.02789
+    # transformer v2.0 (full transformer + same token): 13.46105 -> 0.04392
+    # transformer v2.0.1 (full transformer + same token + mask): 11.68639 -> 0.04158
