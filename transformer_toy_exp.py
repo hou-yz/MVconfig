@@ -1,3 +1,4 @@
+import random
 import numpy as np
 import torch
 from torch import nn
@@ -37,26 +38,35 @@ class Counter(nn.Module):
             self.positional_embedding = create_pos_embedding(num_cam, hidden_dim)
             # CHECK: batch_first=True for transformer
             self.transformer = nn.TransformerEncoderLayer(hidden_dim, 8, hidden_dim * 4, batch_first=True)
-            self.state_token = nn.Parameter(torch.randn(hidden_dim))
+            self.state_token = nn.Parameter(torch.randn(num_cam, hidden_dim))
         self.output_head = nn.Linear(hidden_dim, num_cam)
 
     def forward(self, configs, step):
         B, N, C = configs.shape
         if self.arch == 'transformer':
-            x_config = self.config_branch(configs.flatten(0, 1)).unflatten(0, [B, N])
-            x = x_config + self.positional_embedding.to(configs.device)
-            x = torch.cat([self.state_token.repeat([B, 1, 1]), x], dim=1)
-            mask = torch.arange(-1, N).repeat([B, 1]) > step[:, None]
+            x = self.config_branch(configs.flatten(0, 1)).unflatten(0, [B, N])
+            token_location = (torch.arange(N).repeat(B, 1) == step[:, None] + 1)
+            x[token_location] = self.state_token[step]
+            x += self.positional_embedding.to(configs.device)
+            mask = torch.arange(0, N).repeat([B, 1]) > step[:, None] + 1
             x = self.transformer(x, src_key_padding_mask=mask)
             # Classifier "token" as used by standard language architectures
-            x = x[:, 0]
+            x = x[token_location]
         else:
-            x = x_config = self.config_branch(configs.flatten(1, 2))
+            x = self.config_branch(configs.flatten(1, 2))
         out = self.output_head(x)
         return out
 
 
 if __name__ == '__main__':
+
+    seed = 1
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
     num_cam, config_dim = 4, 7
     batch_size, num_epochs = 32, 10
     trainset = NumWordDataset(360, num_cam, config_dim)
@@ -78,8 +88,10 @@ if __name__ == '__main__':
         print(f'{train_loss:.5f}')
 
     # loss
-    # fc: 14.18504 -> 0.05645
-    # transformer v0 (encoder + prefix multi-query): 6.12997 -> 0.02429
-    # transformer v0.1 (encoder + prefix multi-query + mask): 6.94008 -> 0.02217
-    # transformer v1 (encoder + prefix same query): 15.10486 -> 0.17619
-    # transformer v1.1 (encoder + prefix same query + mask): 13.36482 -> 0.22661
+    # fc: 15.75898 -> 0.06424
+    # transformer v0.0 (encoder + prefix + multi query): 7.04339 -> 0.03376
+    # transformer v0.0.1 (encoder + prefix + multi query + mask): 6.89566 -> 0.03512
+    # transformer v0.1 (encoder + prefix + same query): 13.48105 -> 0.16533
+    # transformer v0.1.1 (encoder + prefix + same query + mask): 13.02086 -> 0.09835
+    # transformer v1.0 (encoder + in-place + multi query): 7.02461 -> 0.03238
+    # transformer v1.1 (encoder + in-place + same query): 11.73027 -> 0.06264
