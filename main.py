@@ -72,10 +72,6 @@ def main(args):
                              img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                              img_kernel_size=args.img_kernel_size, augmentation=args.augmentation,
                              interactive=args.interactive, seed=args.carla_seed)
-    val_set = frameDataset(base, split='val', world_reduce=args.world_reduce,
-                           img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                           img_kernel_size=args.img_kernel_size,
-                           interactive=args.interactive, seed=args.carla_seed)
     test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
                             img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                             img_kernel_size=args.img_kernel_size,
@@ -88,8 +84,6 @@ def main(args):
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                               pin_memory=True, worker_init_fn=seed_worker)
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
-                            pin_memory=True, worker_init_fn=seed_worker)
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                              pin_memory=True, worker_init_fn=seed_worker)
 
@@ -203,6 +197,7 @@ def main(args):
     print(logdir)
     trainer.test(test_loader)
     if args.interactive:
+        base.env.close()
         writer.close()
 
 
