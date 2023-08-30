@@ -4,15 +4,13 @@ from queue import Queue
 import random
 import subprocess
 import time
-
-import carla
 import math
+import carla
 import cv2
 import gym
 from gym import spaces
 import numpy as np
 import matplotlib.pyplot as plt
-
 from src.environment.cameras import build_cam
 from src.environment.utils import loc_dist, pflat
 
@@ -123,6 +121,9 @@ class CarlaCameraSeqEnv(gym.Env):
     def __init__(self, opts, host="127.0.0.1", port=2000, tm_port=8000):
         self.opts = opts
 
+        # default seed
+        self.random_generator = random.Random(None)
+        self.np_random_generator = np.random.default_rng(None)
         # Connect to the CARLA simulator
         self.client = carla.Client(host, port)
         self.client.set_timeout(10.0)
@@ -285,10 +286,6 @@ class CarlaCameraSeqEnv(gym.Env):
             "step": self.step_counter
         }
         self.update_pedestrian_gts()
-        # update pedestrian bbox from each camera view
-        # for i, pedestrian in enumerate(self.pedestrians):
-        #     actor = self.world.get_actor(pedestrian['id'])
-        #     self.pedestrian_gts[i]["views"][self.step_counter] = self.get_pedestrian_view(actor, cam=self.step_counter)
 
         # Set the reward for the current step
         reward = 0

@@ -109,12 +109,15 @@ class frameDataset(VisionDataset):
         self.gt_fname = f'{self.root}/gt.txt'
         if self.base.__name__ == 'CarlaX':
             # generate same pedestrian layout for the same frame
-            # random_generator = random.Random(seed)
-            np_random_generator = np.random.default_rng(seed)
-            self.fixed_seeds = np_random_generator.choice(65536, size=self.num_frame, replace=False)[frame_range]
+            if seed is not None:
+                # random_generator = random.Random(seed)
+                np_random_generator = np.random.default_rng(seed)
+                self.fixed_seeds = np_random_generator.choice(65536, size=self.num_frame, replace=False)[frame_range]
+            else:
+                self.fixed_seeds = [None] * len(frame_range)
             self.frames = list(frame_range)
             self.world_gt = {}
-            self.gt_array = np.array([]).reshape([0, 3])
+            # self.gt_array = np.array([]).reshape([0, 3])
             self.config_dim = base.env.observation_space['camera_configs'].shape[0]
             self.action_dim = base.env.action_space.shape[0] if interactive else None
         else:
@@ -158,7 +161,7 @@ class frameDataset(VisionDataset):
                 np.savetxt(self.gt_fname, np.unique(np.concatenate(og_gt, axis=0), axis=0), '%d')
                 for cam in range(self.num_cam):
                     np.savetxt(f'{self.gt_fname}.{cam}', og_gt[cam], '%d')
-            self.gt_array = np.loadtxt(self.gt_fname)
+            # self.gt_array = np.loadtxt(self.gt_fname)
             self.config_dim = None
             self.action_dim = None
         pass
@@ -273,15 +276,7 @@ class frameDataset(VisionDataset):
             world_pts, world_pids = world_pts[:, :2], world_pids
 
             # record world gt
-            if frame not in self.world_gt:
-                self.world_gt[frame] = (world_pts, world_pids)
-                self.gt_array = np.concatenate([self.gt_array,
-                                                np.concatenate([frame * np.ones([len(world_pts), 1]),
-                                                                world_pts], axis=1)],
-                                               axis=0)
-                # np.savetxt(self.gt_fname, np.concatenate(self.gt_array, axis=0), '%d')
-            # else:
-            #     assert (self.world_gt[frame][0] == world_pts).all()
+            self.world_gt[frame] = (world_pts, world_pids)
         else:
             imgs = {cam: np.array(Image.open(self.img_fpaths[cam][frame]).convert('RGB'))
                     for cam in range(self.num_cam)}
@@ -290,6 +285,19 @@ class frameDataset(VisionDataset):
             img_bboxs, img_pids = zip(*self.imgs_gt[frame].values())
             world_pts, world_pids = self.world_gt[frame]
         return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, visualize)
+
+    def get_gt_array(self, frames=None):
+        if self.base.__name__ == 'CarlaX':
+            gt_array = []
+            for frame in self.world_gt.keys() if frames is None else frames:
+                gt_array.append(np.concatenate([frame * np.ones([len(self.world_gt[frame][0]), 1]),
+                                                self.world_gt[frame][0]], axis=1))
+            gt_array = np.concatenate(gt_array, axis=0)
+        else:
+            gt_array = np.loadtxt(self.gt_fname)
+            if frames is not None:
+                gt_array = gt_array[np.isin(gt_array[:, 0], frames)]
+        return gt_array
 
     def step(self, action, visualize=False):
         observation, reward, done, info = self.base.env.step(action)

@@ -70,8 +70,10 @@ def main(args):
 
     train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
                              img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                             img_kernel_size=args.img_kernel_size, augmentation=args.augmentation,
-                             interactive=args.interactive, seed=args.carla_seed)
+                             img_kernel_size=args.img_kernel_size, interactive=args.interactive,
+                             augmentation=args.augmentation and not args.interactive,
+                             seed=None if args.interactive else args.carla_seed,  # random in interactive carla training
+                             )
     test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
                             img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                             img_kernel_size=args.img_kernel_size,
@@ -234,7 +236,7 @@ if __name__ == '__main__':
     parser.add_argument('--actstd_lr', type=float, default=1e-2, help='learning rate for actor std')
     # https://arxiv.org/abs/2006.05990
     parser.add_argument('--actstd_init', type=float, default=1.0, help='initial value actor std')
-    parser.add_argument("--reward", default='moda+maxcover')
+    parser.add_argument("--reward", default='moda')
     # https://www.reddit.com/r/reinforcementlearning/comments/n09ns2/explain_why_ppo_fails_at_this_very_simple_task/
     # https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
     parser.add_argument("--ppo_steps", type=int, default=256,
