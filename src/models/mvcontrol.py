@@ -28,15 +28,16 @@ class CamControl(nn.Module):
         super().__init__()
         self.arch = arch
         self.feat_branch = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
-                                         nn.ReLU(), nn.MaxPool2d(2, 2),
+                                         nn.LeakyReLU(), nn.MaxPool2d(2, 2),
                                          nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
-                                         nn.ReLU(), nn.MaxPool2d(2, 2),
+                                         nn.LeakyReLU(), nn.MaxPool2d(2, 2),
                                          nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
                                          nn.AdaptiveAvgPool2d((1, 1)), nn.Flatten())
-        self.config_branch = nn.Sequential(
-            nn.Linear(dataset.config_dim * (1 if arch == 'transformer' else dataset.num_cam), hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim))
+        self.config_branch = nn.Sequential(nn.Linear(dataset.config_dim * (1 if arch == 'transformer'
+                                                                           else dataset.num_cam), hidden_dim),
+                                           nn.LeakyReLU(),
+                                           nn.Linear(hidden_dim, hidden_dim), nn.LeakyReLU(),
+                                           nn.Linear(hidden_dim, hidden_dim))
         if arch == 'transformer':
             # transformer
             self.positional_embedding = create_pos_embedding(dataset.num_cam, hidden_dim)
@@ -47,11 +48,11 @@ class CamControl(nn.Module):
             self.transformer = nn.Transformer(hidden_dim, 8, 2, 2, hidden_dim * 4, batch_first=True)
             self.state_token = nn.Parameter(torch.randn(dataset.num_cam, hidden_dim))
 
-        self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
-                                    layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
+        self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
+                                    layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
                                     layer_init(nn.Linear(hidden_dim, 1), std=1.0))
-        self.actor_mean = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
-                                        layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
+        self.actor_mean = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
+                                        layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
                                         layer_init(nn.Linear(hidden_dim, dataset.action_dim), std=0.01))
         self.actor_logstd = nn.Parameter(torch.ones(1, dataset.action_dim) * np.log(actstd_init))
 
