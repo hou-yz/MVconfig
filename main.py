@@ -233,9 +233,9 @@ if __name__ == '__main__':
     parser.add_argument('--carla_tm_port', type=int, default=8000)
     # RL arguments
     parser.add_argument('--control_lr', type=float, default=3e-4, help='learning rate for MVcontrol')
-    parser.add_argument('--actstd_lr', type=float, default=1e-2, help='learning rate for actor std')
+    parser.add_argument('--actstd_lr', type=float, default=3e-3, help='learning rate for actor std')
     # https://arxiv.org/abs/2006.05990
-    parser.add_argument('--actstd_init', type=float, default=1.0, help='initial value actor std')
+    parser.add_argument('--actstd_init', type=float, default=0.5, help='initial value actor std')
     parser.add_argument("--reward", default='moda')
     # https://www.reddit.com/r/reinforcementlearning/comments/n09ns2/explain_why_ppo_fails_at_this_very_simple_task/
     # https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
