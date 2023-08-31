@@ -52,7 +52,7 @@ class PerspectiveTrainer(object):
         while not next_done:
             # step 1 ~ N: action
             with torch.no_grad():
-                action, logprob, _, value = self.agent.get_action_and_value(
+                action, logprob, _, value, _ = self.agent.get_action_and_value(
                     (obs_feat, configs, step), deterministic=self.args.rl_deterministic and not training)
             if training:
                 self.rl_global_step += 1 * B
@@ -230,7 +230,7 @@ class PerspectiveTrainer(object):
             for start in range(0, N - self.args.rl_minibatch_size + 1, self.args.rl_minibatch_size):  # drop_last=True
                 end = start + self.args.rl_minibatch_size
                 mb_inds = b_inds[start:end]
-                _, newlogprob, entropy, newvalue = \
+                _, newlogprob, entropy, newvalue, probs = \
                     self.agent.get_action_and_value((b_cam_feat[b_feat_inds[mb_inds]].cuda(),
                                                      b_configs[mb_inds],
                                                      b_step[mb_inds]),
@@ -266,7 +266,7 @@ class PerspectiveTrainer(object):
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-                entropy_loss = entropy.sum(1).mean()
+                entropy_loss = entropy.mean()
                 loss = pg_loss - self.args.ent_coef * entropy_loss + v_loss * self.args.vf_coef
 
                 optimizer.zero_grad()
@@ -287,8 +287,6 @@ class PerspectiveTrainer(object):
         self.writer.add_scalar("losses/value_loss", v_loss.item(), self.rl_global_step)
         self.writer.add_scalar("losses/policy_loss", pg_loss.item(), self.rl_global_step)
         self.writer.add_scalar("losses/entropy", entropy_loss.item(), self.rl_global_step)
-        self.writer.add_scalar("charts/logstd", self.model.control_module.actor_logstd.mean().item(),
-                               self.rl_global_step)
         self.writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), self.rl_global_step)
         self.writer.add_scalar("losses/approx_kl", approx_kl.item(), self.rl_global_step)
         self.writer.add_scalar("losses/clipfrac", np.mean(clipfracs), self.rl_global_step)
@@ -298,11 +296,14 @@ class PerspectiveTrainer(object):
 
         with np.printoptions(formatter={'float': '{: 0.3f}'.format}):
             # action_space = env.base.env.opts['env_action_space'].split('-')
-            # action_std = np.exp(self.model.control_module.actor_logstd.detach().cpu().numpy())
+            mu = probs.loc.detach().cpu().numpy()
+            sigma = probs.scale.detach().cpu().numpy()
+            # alpha = probs.concentration1.detach().cpu().numpy()
+            # beta = probs.concentration0.detach().cpu().numpy()
             print(f'v loss: {v_loss.item():.3f}, p loss: {pg_loss.item():.3f}, '
                   f'avg return: {b_returns.mean().item():.3f}, '
-                  # f'action std: {action_std}'
-                  f'entropy: {entropy.detach().cpu().mean(0).numpy()}'
+                  f'\nmu: \t{mu.mean(0)} \nsigma: \t{sigma.mean(0)}'
+                  # f'\nalpha: \t{alpha.mean(0)} \nbeta: \t{beta.mean(0)}'
                   )
 
         del b_cam_feat, b_configs, b_step, b_actions, b_logprobs, b_advantages, b_returns, b_values
