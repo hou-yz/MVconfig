@@ -54,7 +54,7 @@ class CamControl(nn.Module):
         self.actor_mean = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
                                         layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
                                         layer_init(nn.Linear(hidden_dim, dataset.action_dim), std=0.01))
-        self.actor_logstd = nn.Parameter(torch.ones(1, dataset.action_dim) * np.log(actstd_init))
+        self.actor_logstd = nn.Parameter(torch.ones(dataset.action_dim) * np.log(actstd_init))
 
     def get_value(self, state):
         return self.critic(state)
@@ -88,7 +88,7 @@ class CamControl(nn.Module):
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+        return action, probs.log_prob(action).sum(1), probs.entropy(), self.critic(x)
 
 
 if __name__ == '__main__':
