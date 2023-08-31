@@ -140,7 +140,7 @@ class CarlaCameraSeqEnv(gym.Env):
         # print(self.map_width)
 
         self.num_cam = self.opts["num_cam"]
-        # step counter for deciding whether episode ends
+        # have seen how many cameras
         self.step_counter = 0
 
         # Define your environment's observation space
@@ -201,9 +201,11 @@ class CarlaCameraSeqEnv(gym.Env):
         _action = np.clip(_action, -1, 1)
         _cfg = decode_camera_cfg(_action, self.opts)
         _location, _rotation, _fov = _cfg[:3], _cfg[3:6], _cfg[6]
+        # have seen self.step_counter cameras
+        cam = self.step_counter - 1
         # default settings for limited action space
-        location, rotation, fov = np.array(self.opts["cam_pos_lst"])[self.step_counter], \
-            np.array(self.opts["cam_dir_lst"])[self.step_counter], \
+        location, rotation, fov = np.array(self.opts["cam_pos_lst"])[cam], \
+            np.array(self.opts["cam_dir_lst"])[cam], \
             np.array(self.opts["cam_fov"]).reshape([1])
         if 'x' in action_space: location[0] = _location[0]
         if 'y' in action_space: location[1] = _location[1]
@@ -256,24 +258,26 @@ class CarlaCameraSeqEnv(gym.Env):
         rot = carla.Rotation(*action[3:6])
         fov = action[6]
         new_transform = carla.Transform(loc, rot)
-        if float(self.cameras[self.step_counter].attributes["fov"]) != fov:
+        # have seen self.step_counter cameras
+        cam = self.step_counter - 1
+        if float(self.cameras[cam].attributes["fov"]) != fov:
             # change camera fov, first destroy the old camera
-            self.cameras[self.step_counter].destroy()
+            self.cameras[cam].destroy()
             # create new camera blueprint
             self.camera_bp.set_attribute("fov", str(fov))
             # spawn the camera
             camera = self.world.spawn_actor(self.camera_bp, new_transform)
             # record camera related information
-            self.cameras[self.step_counter] = camera
+            self.cameras[cam] = camera
         else:
             # update the camera transform
-            self.cameras[self.step_counter].set_transform(new_transform)
+            self.cameras[cam].set_transform(new_transform)
 
         # update camera mats
         cam_config, intrinsic, extrinsic = get_camera_config(self.opts["cam_x"], self.opts["cam_y"], loc, rot, fov)
-        self.camera_configs[self.step_counter] = cam_config
-        self.camera_intrinsics[self.step_counter] = intrinsic
-        self.camera_extrinsics[self.step_counter] = extrinsic
+        self.camera_configs[cam] = cam_config
+        self.camera_intrinsics[cam] = intrinsic
+        self.camera_extrinsics[cam] = extrinsic
 
         time.sleep(SLEEP_TIME)
 
@@ -290,7 +294,7 @@ class CarlaCameraSeqEnv(gym.Env):
         # Set the reward for the current step
         reward = 0
         # Set condition for the end of episode: after a fixed number of step() call
-        done = self.step_counter + 1 >= self.num_cam  # Set whether the episode has terminated or not
+        done = self.step_counter >= self.num_cam  # Set whether the episode has terminated or not
         # Set any additional information, the info can be used to calculate reward outside gym env
         info = {"pedestrian_gts": copy.deepcopy(self.pedestrian_gts),
                 "camera_intrinsics": self.camera_intrinsics,
@@ -603,7 +607,7 @@ if __name__ == '__main__':
     import json
     from tqdm import tqdm
 
-    with open('cfg/RL/1_6dof.cfg', "r") as fp:
+    with open('../../cfg/RL/1_6dof.cfg', "r") as fp:
         dataset_config = json.load(fp)
     # dataset_config['motion'] = True
     # dataset_config['n_chatgroup'] = 4
@@ -612,6 +616,8 @@ if __name__ == '__main__':
     done = False
     for i in tqdm(range(400 * 100)):
         observation, info = env.reset(motion=True)
+        print(observation['step'])
         while not done:
             observation, reward, done, info = env.step(np.random.rand(7))
+            print(observation['step'])
         done = False

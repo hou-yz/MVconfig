@@ -337,12 +337,20 @@ class frameDataset(VisionDataset):
             plt.imshow(img0)
             plt.show()
 
-        if self.interactive and step_counter is not None:
-            imgs = {step_counter: imgs[step_counter]}
-            configs = np.array([config for cam, config in configs.items()], dtype=np.float32)
+        # world gt
+        world_gt = get_centernet_gt(self.Rworld_shape, world_pts[:, 0], world_pts[:, 1], world_pids,
+                                    reduce=self.world_reduce, top_k=self.top_k, kernel_size=self.world_kernel_size)
+        if self.interactive:
+            configs = np.array([config for config in configs.values()], dtype=np.float32)
             # IMPORTANT: mask out future steps
-            padding_mask = np.arange(self.num_cam) > step_counter
+            padding_mask = np.arange(self.num_cam) > step_counter - 1
             configs[padding_mask] = CONFIGS_PADDING_VALUE
+            # initialization with no observation
+            if step_counter == 0:
+                imgs, aug_mats, proj_mats, imgs_gt = [], [], [], {}
+                return (step_counter, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, self.cur_frame)
+            cam = step_counter - 1
+            imgs = {cam: imgs[cam]}
         else:
             step_counter = self.num_cam
             configs = np.zeros([self.num_cam, 0])
@@ -371,9 +379,6 @@ class frameDataset(VisionDataset):
         aug_imgs = torch.stack(aug_imgs)
         aug_mats = torch.stack(aug_mats)
         aug_imgs_gt = {key: torch.stack([img_gt[key] for img_gt in aug_imgs_gt]) for key in aug_imgs_gt[0]}
-        # world gt
-        world_gt = get_centernet_gt(self.Rworld_shape, world_pts[:, 0], world_pts[:, 1], world_pids,
-                                    reduce=self.world_reduce, top_k=self.top_k, kernel_size=self.world_kernel_size)
         return (step_counter, configs, aug_imgs, aug_mats, self.proj_mats[list(imgs.keys())],
                 world_gt, aug_imgs_gt, self.cur_frame)
 
@@ -399,10 +404,10 @@ if __name__ == '__main__':
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
     import json
 
-    with open('./cfg/RL/1.cfg', "r") as fp:
+    with open('../../cfg/RL/1.cfg', "r") as fp:
         dataset_config = json.load(fp)
     # dataset = frameDataset(CarlaX(dataset_config), split_ratio=(0.01, 0.1, 0.1))
-    dataset = frameDataset(CarlaX(dataset_config), split_ratio=(0.01, 0.1, 0.1), interactive=True, seed=seed)
+    dataset = frameDataset(CarlaX(dataset_config, port=2100, tm_port=8100), interactive=True, seed=seed)
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train')
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train', semi_supervised=.1)
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', semi_supervised=0.5)
