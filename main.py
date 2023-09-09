@@ -92,7 +92,7 @@ def main(args):
     # logging
     RL_settings = f'RL_{args.carla_cfg}_{args.reward}_{"C" if args.control_arch == "conv" else "T"}_' \
                   f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
-                  f'stdinit{args.actstd_init}lr{args.actstd_lr}_ent{args.ent_coef}_' \
+                  f'stdinit{args.actstd_init}_ent{args.ent_coef}_' \
                   f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{RL_settings}' \
              f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
@@ -147,12 +147,8 @@ def main(args):
                     "lr": args.lr * args.other_lr_ratio, } if not args.interactive else {"params": [], "lr": 0},
                    {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
                     "lr": args.lr * args.base_lr_ratio, } if not args.interactive else {"params": [], "lr": 0},
-                   {"params": [p for n, p in model.named_parameters()
-                               if 'control' in n and 'logstd' not in n and p.requires_grad],
-                    "lr": args.control_lr, },
-                   {"params": [p for n, p in model.named_parameters()
-                               if 'control' in n and 'logstd' in n and p.requires_grad],
-                    "lr": args.actstd_lr, }, ]
+                   {"params": [p for n, p in model.named_parameters() if 'control' in n and p.requires_grad],
+                    "lr": args.control_lr, }]
     optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
     def warmup_lr_scheduler(epoch, warmup_epochs=0.1 * args.epochs):
@@ -162,7 +158,7 @@ def main(args):
             return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler) if not args.interactive \
-        else torch.optim.lr_scheduler.StepLR(optimizer, step_size=20)
+        else torch.optim.lr_scheduler.StepLR(optimizer, step_size=30)
 
     trainer = PerspectiveTrainer(model, logdir, writer, args)
 
@@ -232,8 +228,7 @@ if __name__ == '__main__':
     parser.add_argument('--carla_port', type=int, default=2000)
     parser.add_argument('--carla_tm_port', type=int, default=8000)
     # RL arguments
-    parser.add_argument('--control_lr', type=float, default=3e-4, help='learning rate for MVcontrol')
-    parser.add_argument('--actstd_lr', type=float, default=3e-3, help='learning rate for actor std')
+    parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
     # https://arxiv.org/abs/2006.05990
     parser.add_argument('--actstd_init', type=float, default=0.5, help='initial value actor std')
     parser.add_argument("--reward", default='moda')
@@ -256,7 +251,7 @@ if __name__ == '__main__':
                         help="the surrogate clipping coefficient")
     parser.add_argument("--clip_vloss", type=str2bool, default=True,
                         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
-    parser.add_argument("--ent_coef", type=float, default=0.0,
+    parser.add_argument("--ent_coef", type=float, default=0.001,
                         help="coefficient of the entropy")
     parser.add_argument("--vf_coef", type=float, default=0.5,
                         help="coefficient of the value function")

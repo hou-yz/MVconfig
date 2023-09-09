@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from src.loss import *
 from src.evaluation.evaluate import evaluate, evaluateDetection_py
+from src.models.mvcontrol import expectation
 from src.utils.decode import ctdet_decode, mvdet_decode
 from src.utils.nms import nms
 from src.utils.meters import AverageMeter
@@ -47,12 +48,14 @@ class PerspectiveTrainer(object):
         next_done = False
         obs_feat = torch.zeros([B, env.num_cam, self.model.base_dim, *env.Rworld_shape]).cuda()
         imgs = []
+        # beta distribution in agent will output [0, 1], whereas the env has action space of [-1, 1]
+        action_mapping = torch.tanh
         # step 0: initialization
         cam_feat = torch.zeros([B, 1, self.model.base_dim, *env.Rworld_shape]).cuda()
         while not next_done:
             # step 1 ~ N: action
             with torch.no_grad():
-                action, logprob, _, value, _ = self.agent.get_action_and_value(
+                action, value, probs = self.agent.get_action_and_value(
                     (obs_feat, configs, step), deterministic=self.args.rl_deterministic and not training)
             if training:
                 self.rl_global_step += 1 * B
@@ -62,7 +65,7 @@ class PerspectiveTrainer(object):
                 self.memory_bank['dones'].append(next_done)
                 self.memory_bank['actions'].append(action)
                 self.memory_bank['values'].append(value.item())
-                self.memory_bank['logprobs'].append(logprob.item())
+                self.memory_bank['logprobs'].append(probs.log_prob(action).sum(-1).item())
 
             (step, configs, img, aug_mat, proj_mat, world_gt, img_gt, frame), next_done = \
                 env.step(action.cpu()[0].numpy())
@@ -92,6 +95,7 @@ class PerspectiveTrainer(object):
             # Now we can save it to a numpy array.
             data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
             data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            plt.close()
             plt.cla()
             plt.clf()
             return data
@@ -125,9 +129,9 @@ class PerspectiveTrainer(object):
                 returns[t] = rewards[t] + self.args.gamma * nextnonterminal * next_return
                 advantages[t] = returns[t] - values[t]
         for t in range(env.num_cam):
-            # self.memory_bank['rewards'].append(rewards[t])
-            self.memory_bank['advantages'].append(advantages[t])
-            self.memory_bank['returns'].append(returns[t])
+            # self.memory_bank['rewards'].append(float(rewards[t]))
+            self.memory_bank['advantages'].append(float(advantages[t]))
+            self.memory_bank['returns'].append(float(returns[t]))
 
         self.writer.add_scalar("charts/episodic_return", rewards.sum().item(), self.rl_global_step)
         self.writer.add_scalar("charts/episodic_length", step.item(), self.rl_global_step)
@@ -230,11 +234,11 @@ class PerspectiveTrainer(object):
             for start in range(0, N - self.args.rl_minibatch_size + 1, self.args.rl_minibatch_size):  # drop_last=True
                 end = start + self.args.rl_minibatch_size
                 mb_inds = b_inds[start:end]
-                _, newlogprob, entropy, newvalue, probs = \
-                    self.agent.get_action_and_value((b_cam_feat[b_feat_inds[mb_inds]].cuda(),
-                                                     b_configs[mb_inds],
-                                                     b_step[mb_inds]),
-                                                    b_actions[mb_inds])
+                action, newvalue, probs = self.agent.get_action_and_value((b_cam_feat[b_feat_inds[mb_inds]].cuda(),
+                                                                           b_configs[mb_inds],
+                                                                           b_step[mb_inds]),
+                                                                          b_actions[mb_inds])
+                newlogprob = probs.log_prob(action).sum(-1)
                 logratio = newlogprob - b_logprobs[mb_inds].cuda()
                 ratio = logratio.exp()
 
@@ -266,7 +270,13 @@ class PerspectiveTrainer(object):
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-                entropy_loss = entropy.mean()
+                # https://arxiv.org/pdf/2006.05990.pdf
+                # section B.8
+                entropy_loss = (probs.entropy()
+                                # + expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale],
+                                #               lambda x: torch.log(4 / (torch.exp(x) + torch.exp(-x)) ** 2),
+                                #               device='cuda')
+                                ).sum(-1).mean()
                 loss = pg_loss - self.args.ent_coef * entropy_loss + v_loss * self.args.vf_coef
 
                 optimizer.zero_grad()
@@ -296,15 +306,17 @@ class PerspectiveTrainer(object):
 
         with np.printoptions(formatter={'float': '{: 0.3f}'.format}):
             # action_space = env.base.env.opts['env_action_space'].split('-')
-            mu = probs.loc.detach().cpu().numpy()
-            sigma = probs.scale.detach().cpu().numpy()
-            # alpha = probs.concentration1.detach().cpu().numpy()
-            # beta = probs.concentration0.detach().cpu().numpy()
-            print(f'v loss: {v_loss.item():.3f}, p loss: {pg_loss.item():.3f}, '
-                  f'avg return: {b_returns.mean().item():.3f}, '
-                  f'\nmu: \t{mu.mean(0)} \nsigma: \t{sigma.mean(0)}'
-                  # f'\nalpha: \t{alpha.mean(0)} \nbeta: \t{beta.mean(0)}'
-                  )
+            print(f'v loss: {v_loss.item():.3f}, p loss: {pg_loss.item():.3f}, ent: {entropy_loss.item():.3f}, '
+                  f'avg return: {b_returns.mean().item():.3f}')
+            if torch.where(b_step[mb_inds] == 0)[0].numel():
+                idx = torch.where(b_step[mb_inds] == 0)[0][0].item()
+                mu = probs.loc.detach().cpu().numpy()
+                sigma = probs.scale.detach().cpu().numpy()
+                # alpha = probs.concentration1.detach().cpu().numpy()
+                # beta = probs.concentration0.detach().cpu().numpy()
+                print(f'step 0: mu: \t{mu[idx]} \n        sigma: \t{sigma[idx]}'
+                      # f'step 0: \talpha: \t{alpha[idx]} \n        \tbeta: \t{beta[idx]}'
+                      )
 
         del b_cam_feat, b_configs, b_step, b_actions, b_logprobs, b_advantages, b_returns, b_values
 

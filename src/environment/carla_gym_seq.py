@@ -606,18 +606,36 @@ def get_camera_config(image_w, image_h, loc, rot, fov):
 if __name__ == '__main__':
     import json
     from tqdm import tqdm
+    import torchvision.transforms as T
 
     with open('../../cfg/RL/1_6dof.cfg', "r") as fp:
         dataset_config = json.load(fp)
-    # dataset_config['motion'] = True
-    # dataset_config['n_chatgroup'] = 4
+    dataset_config['motion'] = True
+    dataset_config['n_chatgroup'] = 4
+    transform = T.Compose([T.ToTensor(), T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)), ])
 
     env = CarlaCameraSeqEnv(dataset_config, port=2100, tm_port=8100)
-    done = False
-    for i in tqdm(range(400 * 100)):
-        observation, info = env.reset(motion=True)
-        print(observation['step'])
-        while not done:
-            observation, reward, done, info = env.step(np.random.rand(7))
-            print(observation['step'])
-        done = False
+    # done = False
+    # for i in tqdm(range(400 * 100)):
+    #     observation, info = env.reset(motion=True)
+    #     print(observation['step'])
+    #     j = 0
+    #     while not done:
+    #         # observation, reward, done, info = env.step(np.random.rand(7))
+    #         x, y, z = dataset_config['cam_pos_lst'][j]
+    #         pitch, yaw, roll = dataset_config['cam_dir_lst'][j]
+    #         fov = dataset_config['cam_fov']
+    #         cfg = [x, y, z, pitch, yaw, roll, fov]
+    #         observation, reward, done, info = env.step(encode_camera_cfg(cfg, dataset_config))
+    #         print(observation['step'])
+    #         j += 1
+    #     done = False
+
+    # in loop listen
+    env.reset()
+    t0 = time.time()
+    for i in tqdm(range(400)):
+        for j in range(NUM_TICKS):
+            env.world.tick()
+        env.render()
+    print(f'in-loop listen time: {time.time() - t0}')
