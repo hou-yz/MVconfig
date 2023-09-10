@@ -13,9 +13,9 @@ CONFIGS_PADDING_VALUE = -3
 class NumWordDataset(Dataset):
     def __init__(self, length, num_cam, config_dim):
         self.num_cam = num_cam
-        self.steps = torch.randint(0, num_cam - 1, [length])
+        self.steps = torch.randint(0, num_cam, [length])
         self.data = torch.randn([length, num_cam, config_dim])
-        self.data[torch.arange(num_cam).repeat(length, 1) > self.steps[:, None]] = CONFIGS_PADDING_VALUE
+        self.data[torch.arange(num_cam).repeat(length, 1) >= self.steps[:, None]] = CONFIGS_PADDING_VALUE
 
     def __len__(self):
         return len(self.steps)
@@ -37,7 +37,8 @@ class Counter(nn.Module):
             # transformer
             self.positional_embedding = create_pos_embedding(num_cam, hidden_dim)
             # CHECK: batch_first=True for transformer
-            self.transformer = nn.Transformer(hidden_dim, 8, 2, 2, hidden_dim * 4, batch_first=True)
+            encoder_layer = nn.TransformerEncoderLayer(hidden_dim, 8, hidden_dim * 4, batch_first=True)
+            self.transformer = nn.TransformerEncoder(encoder_layer, 3)
             self.state_token = nn.Parameter(torch.randn(num_cam, hidden_dim))
         self.output_head = nn.Linear(hidden_dim, num_cam)
 
@@ -45,13 +46,14 @@ class Counter(nn.Module):
         B, N, C = configs.shape
         if self.arch == 'transformer':
             x = self.config_branch(configs.flatten(0, 1)).unflatten(0, [B, N])
+            token_location = (torch.arange(N).repeat([B, 1]) == step[:, None])
+            x[token_location] = self.state_token[step]
+            x += self.positional_embedding
             # mask out future steps
             # mask = (torch.arange(N).repeat([B, 1]) > step[:, None])
             # x[mask] = 0
-            x += self.positional_embedding
-            query = self.state_token[step, None]
-            x = self.transformer(x, query, src_key_padding_mask=None, memory_key_padding_mask=None)
-            x = x[:, 0]
+            x = self.transformer(x)
+            x = x[token_location]
         else:
             x = self.config_branch(configs.flatten(1, 2))
         out = self.output_head(x)

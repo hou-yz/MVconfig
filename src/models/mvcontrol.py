@@ -67,7 +67,8 @@ class CamControl(nn.Module):
             # NOTE: by default nn.Transformer() has enable_nested_tensor=True in its nn.TransformerEncoder(),
             # which can cause `src` to change from [B, 4, C] into [B, 1<=n<=3, C] when given `src_key_padding_mask`,
             # raising error for nn.TransformerDecoder()
-            self.transformer = nn.Transformer(hidden_dim, 8, 2, 2, hidden_dim * 4, batch_first=True)
+            encoder_layer = nn.TransformerEncoderLayer(hidden_dim, 8, hidden_dim * 4, batch_first=True)
+            self.transformer = nn.TransformerEncoder(encoder_layer, 3)
             self.state_token = nn.Parameter(torch.randn(dataset.num_cam, hidden_dim))
 
         self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
@@ -89,11 +90,13 @@ class CamControl(nn.Module):
             # transformer
             x_feat = self.feat_branch(feat.flatten(0, 1)).unflatten(0, [B, N])
             x_config = self.config_branch(configs.flatten(0, 1).to(feat.device)).unflatten(0, [B, N])
-            x = x_feat + x_config + self.positional_embedding.to(feat.device)
-            query = self.state_token[step, None]
+            x = x_feat + x_config
+            token_location = (torch.arange(N).repeat([B, 1]) == step[:, None])
+            x[token_location] = self.state_token[step]
+            x += self.positional_embedding.to(feat.device)
             # CHECK: batch_first=True for transformer
-            x = self.transformer(x, query)
-            x = x[:, 0]
+            x = self.transformer(x)
+            x = x[token_location]
         else:
             # conv + fc only
             x_feat = self.feat_branch(feat.max(dim=1)[0])
@@ -135,7 +138,7 @@ if __name__ == '__main__':
     model = CamControl(dataset, C, )
     # model.eval()
 
-    state = (torch.randn([B, N, C, H, W]), torch.randn([B, N, dataset.config_dim]), torch.randint(0, N - 1, [B]))
+    state = (torch.randn([B, N, C, H, W]), torch.randn([B, N, dataset.config_dim]), torch.randint(0, N, [B]))
     t0 = time.time()
     for _ in tqdm.tqdm(range(10)):
         # with torch.no_grad():
