@@ -118,8 +118,8 @@ class frameDataset(VisionDataset):
             self.frames = list(frame_range)
             self.world_gt = {}
             # self.gt_array = np.array([]).reshape([0, 3])
-            self.config_dim = base.env.observation_space['camera_configs'].shape[0]
-            self.action_dim = base.env.action_space.shape[0] if interactive else None
+            self.config_dim = base.env.config_dim
+            self.action_names = base.env.action_names if interactive else None
         else:
             # get camera matrices
             self.proj_mats = self.get_world_imgs_trans()
@@ -163,7 +163,7 @@ class frameDataset(VisionDataset):
                     np.savetxt(f'{self.gt_fname}.{cam}', og_gt[cam], '%d')
             # self.gt_array = np.loadtxt(self.gt_fname)
             self.config_dim = None
-            self.action_dim = None
+            self.action_names = None
         pass
 
     def get_image_fpaths(self, frame_range):

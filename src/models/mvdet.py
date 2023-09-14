@@ -66,7 +66,7 @@ class MVDet(MultiviewBase):
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=2, dilation=2), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
 
-        if dataset.action_dim is not None:
+        if dataset.interactive:
             self.control_module = CamControl(dataset, self.base_dim, control_arch, actstd_init)
         else:
             self.control_module = None

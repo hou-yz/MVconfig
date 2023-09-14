@@ -143,22 +143,8 @@ class CarlaCameraSeqEnv(gym.Env):
         # have seen how many cameras
         self.step_counter = 0
 
-        # Define your environment's observation space
-        self.observation_space = spaces.Dict(
-            {
-                "images": spaces.Box(
-                    low=0,
-                    high=255,
-                    shape=(int(self.opts['cam_y']), int(self.opts['cam_x']), 3),
-                    dtype=np.uint8,
-                ),
-                "camera_configs": spaces.Box(-1, 1, shape=(7,)),
-                "step": spaces.Box(-1, self.num_cam - 1, shape=(1,), dtype=int)
-            }
-        )
-
-        # Define your environment's action space
-        self.action_space = spaces.Box(-1, 1, shape=(len(self.opts["env_action_space"].split("-")),))
+        self.config_dim = 7
+        self.action_names = self.opts["env_action_space"].split("-")
 
         # Define any other attributes or variables needed for your environment
         # turn on sync mode
@@ -193,10 +179,9 @@ class CarlaCameraSeqEnv(gym.Env):
         # camera config for the next camera
         # allow more flexible choice of action space (x-y-z-pitch-yaw-roll-fov)
         # convert normalised action space to unnormalised ones
-        action_space = self.opts["env_action_space"].split("-")
         action_dim_dict = {'x': 0, 'y': 1, 'z': 2, 'pitch': 3, 'yaw': 4, 'roll': 5, 'fov': 6}
-        _action = np.zeros(self.observation_space['camera_configs'].shape)
-        for i, action_name in enumerate(action_space):
+        _action = np.zeros(self.config_dim)
+        for i, action_name in enumerate(self.action_names):
             _action[action_dim_dict[action_name]] = act[i]
         _action = np.clip(_action, -1, 1)
         _cfg = decode_camera_cfg(_action, self.opts)
@@ -207,13 +192,13 @@ class CarlaCameraSeqEnv(gym.Env):
         location, rotation, fov = np.array(self.opts["cam_pos_lst"])[cam], \
             np.array(self.opts["cam_dir_lst"])[cam], \
             np.array(self.opts["cam_fov"]).reshape([1])
-        if 'x' in action_space: location[0] = _location[0]
-        if 'y' in action_space: location[1] = _location[1]
-        if 'z' in action_space: location[2] = _location[2]
-        if 'pitch' in action_space: rotation[0] = _rotation[0]
-        if 'yaw' in action_space: rotation[1] = _rotation[1]
-        if 'roll' in action_space: rotation[2] = _rotation[2]
-        if 'fov' in action_space: fov = _fov
+        if 'x' in self.action_names: location[0] = _location[0]
+        if 'y' in self.action_names: location[1] = _location[1]
+        if 'z' in self.action_names: location[2] = _location[2]
+        if 'pitch' in self.action_names: rotation[0] = _rotation[0]
+        if 'yaw' in self.action_names: rotation[1] = _rotation[1]
+        if 'roll' in self.action_names: rotation[2] = _rotation[2]
+        if 'fov' in self.action_names: fov = _fov
 
         action = np.concatenate([location, rotation, fov], axis=0)
         return action
@@ -615,21 +600,21 @@ if __name__ == '__main__':
     transform = T.Compose([T.ToTensor(), T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)), ])
 
     env = CarlaCameraSeqEnv(dataset_config, port=2100, tm_port=8100)
-    # done = False
-    # for i in tqdm(range(400 * 100)):
-    #     observation, info = env.reset(motion=True)
-    #     print(observation['step'])
-    #     j = 0
-    #     while not done:
-    #         # observation, reward, done, info = env.step(np.random.rand(7))
-    #         x, y, z = dataset_config['cam_pos_lst'][j]
-    #         pitch, yaw, roll = dataset_config['cam_dir_lst'][j]
-    #         fov = dataset_config['cam_fov']
-    #         cfg = [x, y, z, pitch, yaw, roll, fov]
-    #         observation, reward, done, info = env.step(encode_camera_cfg(cfg, dataset_config))
-    #         print(observation['step'])
-    #         j += 1
-    #     done = False
+    done = False
+    for i in tqdm(range(400 * 100)):
+        observation, info = env.reset(motion=True)
+        print(observation['step'])
+        j = 0
+        while not done:
+            # observation, reward, done, info = env.step(np.random.rand(7))
+            x, y, z = dataset_config['cam_pos_lst'][j]
+            pitch, yaw, roll = dataset_config['cam_dir_lst'][j]
+            fov = dataset_config['cam_fov']
+            cfg = [x, y, z, pitch, yaw, roll, fov]
+            observation, reward, done, info = env.step(encode_camera_cfg(cfg, dataset_config))
+            print(observation['step'])
+            j += 1
+        done = False
 
     # in loop listen
     env.reset()
