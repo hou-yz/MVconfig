@@ -90,9 +90,9 @@ def main(args):
                              pin_memory=True, worker_init_fn=seed_worker)
 
     # logging
-    RL_settings = f'RL_{args.carla_cfg}_{args.reward}_{"C" if args.control_arch == "conv" else "T"}_' \
+    RL_settings = f'RL_{args.carla_cfg}_{args.reward}_{"C" if args.control_arch == "conv" else "E"}_' \
                   f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
-                  f'stdinit{args.actstd_init}_ent{args.ent_coef}_' \
+                  f'stdinit{args.actstd_init}tanh_ent{args.ent_coef}_div{args.div_coef}_' \
                   f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{RL_settings}' \
              f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
@@ -135,8 +135,12 @@ def main(args):
         writer = None
 
     if args.resume:
-        print(f'loading checkpoint: logs/{args.dataset}/{args.resume}')
-        pretrained_dict = torch.load(f'logs/{args.dataset}/{args.resume}/model.pth')
+        load_dir = f'logs/{args.dataset}/{args.resume}'
+        if not os.path.exists(f'{load_dir}/model.pth'):
+            with open(f'logs/{args.dataset}/{args.arch}_.txt', 'r') as fp:
+                load_dir = fp.read()
+        print(f'loading checkpoint: {load_dir}')
+        pretrained_dict = torch.load(f'{load_dir}/model.pth')
         model_dict = model.state_dict()
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
         model_dict.update(pretrained_dict)
@@ -158,7 +162,7 @@ def main(args):
             return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler) if not args.interactive \
-        else torch.optim.lr_scheduler.StepLR(optimizer, step_size=30)
+        else torch.optim.lr_scheduler.StepLR(optimizer, step_size=20)
 
     trainer = PerspectiveTrainer(model, logdir, writer, args)
 
@@ -194,8 +198,9 @@ def main(args):
     print('Test loaded model...')
     print(logdir)
     trainer.test(test_loader)
-    if args.interactive:
+    if args.dataset == 'carlax':
         base.env.close()
+    if args.interactive:
         writer.close()
 
 
@@ -223,7 +228,7 @@ if __name__ == '__main__':
     # MVcontrol settings
     parser.add_argument('--interactive', action='store_true')
     parser.add_argument('--carla_cfg', type=str, default='1')
-    parser.add_argument('--control_arch', default='conv', choices=['conv', 'transformer'])
+    parser.add_argument('--control_arch', default='transformer', choices=['conv', 'transformer'])
     parser.add_argument('--rl_deterministic', type=str2bool, default=False)
     parser.add_argument('--carla_port', type=int, default=2000)
     parser.add_argument('--carla_tm_port', type=int, default=8000)
@@ -255,6 +260,10 @@ if __name__ == '__main__':
                         help="coefficient of the entropy")
     parser.add_argument("--vf_coef", type=float, default=0.5,
                         help="coefficient of the value function")
+    parser.add_argument("--div_coef", type=float, default=0.3,
+                        help="coefficient of the action diversity")
+    parser.add_argument("--div_clamp", type=float, default=2.0,
+                        help="coefficient of the action diversity")
     parser.add_argument("--max_grad_norm", type=float, default=0.5,
                         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target_kl", type=float, default=None,

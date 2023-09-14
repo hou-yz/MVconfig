@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from src.loss import *
 from src.evaluation.evaluate import evaluate, evaluateDetection_py
-from src.models.mvcontrol import expectation
+from src.models.mvcontrol import expectation, tanh_prime
 from src.utils.decode import ctdet_decode, mvdet_decode
 from src.utils.nms import nms
 from src.utils.meters import AverageMeter
@@ -39,6 +39,9 @@ class PerspectiveTrainer(object):
                             'values': [],
                             'returns': [],
                             'advantages': []}
+        # beta distribution in agent will output [0, 1], whereas the env has action space of [-1, 1]
+        # self.action_mapping = lambda x: torch.clamp(x, -1, 1)
+        self.action_mapping = torch.tanh
 
     # https://github.com/vwxyzjn/ppo-implementation-details
     def expand_episode(self, env, init_obs, training=False, visualize=False):
@@ -48,8 +51,7 @@ class PerspectiveTrainer(object):
         next_done = False
         obs_feat = torch.zeros([B, env.num_cam, self.model.base_dim, *env.Rworld_shape]).cuda()
         imgs = []
-        # beta distribution in agent will output [0, 1], whereas the env has action space of [-1, 1]
-        action_mapping = torch.tanh
+        action_history = []
         # step 0: initialization
         cam_feat = torch.zeros([B, 1, self.model.base_dim, *env.Rworld_shape]).cuda()
         while not next_done:
@@ -63,13 +65,14 @@ class PerspectiveTrainer(object):
                 # only store cam_feat (one cam) instead of obs_feat (all cams) to save memory
                 self.memory_bank['obs'].append((cam_feat[:, 0].cpu() if step.item() != 0 else None, configs, step))
                 self.memory_bank['dones'].append(next_done)
-                self.memory_bank['actions'].append(action)
+                self.memory_bank['actions'].append(action.cpu())
                 self.memory_bank['values'].append(value.item())
                 self.memory_bank['logprobs'].append(probs.log_prob(action).sum(-1).item())
 
             (step, configs, img, aug_mat, proj_mat, world_gt, img_gt, frame), next_done = \
-                env.step(action.cpu()[0].numpy())
+                env.step(self.action_mapping(action[0]).cpu().numpy())
             imgs.append(img)
+            action_history.append(action.cpu())
             step, configs, img, aug_mat, proj_mat = (torch.tensor(step)[None],
                                                      torch.tensor(configs, dtype=torch.float32)[None, :],
                                                      img[None, :], aug_mat[None, :], proj_mat[None, :])
@@ -107,7 +110,8 @@ class PerspectiveTrainer(object):
                 save_image(make_grid(torch.cat(imgs), normalize=True), f'{self.logdir}/imgs.png')
             return obs_feat.cpu(), (world_heatmap, world_offset)
 
-        rewards, (coverages, task_loss, moda), world_heatmap = self.rl_rewards(env, obs_feat[0].cpu(), world_gt, frame)
+        rewards, stats, world_heatmap = self.rl_rewards(env, action_history, obs_feat[0].cpu(), world_gt, frame)
+        coverages, task_loss, moda, min_dist = stats
         # fixed episode length of num_cam - 1 so no need for value bootstrap
         returns, advantages = np.zeros([env.num_cam]), np.zeros([env.num_cam])
         values = np.array(self.memory_bank['values'][-env.num_cam:])
@@ -136,6 +140,7 @@ class PerspectiveTrainer(object):
         self.writer.add_scalar("charts/episodic_return", rewards.sum().item(), self.rl_global_step)
         self.writer.add_scalar("charts/episodic_length", step.item(), self.rl_global_step)
         self.writer.add_scalar("charts/coverage", coverages[-1].item(), self.rl_global_step)
+        self.writer.add_scalar("charts/action_dist", min_dist.mean().item(), self.rl_global_step)
         self.writer.add_scalar("charts/loss", task_loss, self.rl_global_step)
         self.writer.add_scalar("charts/moda", moda, self.rl_global_step)
         if visualize:
@@ -143,10 +148,10 @@ class PerspectiveTrainer(object):
             # self.writer.add_image("images/imgs", make_grid(torch.cat(imgs), normalize=True),
             #                       self.rl_global_step, dataformats='CHW')
 
-        return coverages, task_loss, moda
+        return
 
     # https://github.com/vwxyzjn/ppo-implementation-details
-    def rl_rewards(self, env, obs_feat, world_gt, frame):
+    def rl_rewards(self, env, action_history, obs_feat, world_gt, frame):
         # coverage
         cam_coverages = torch.cat([torch.zeros([1, *env.Rworld_shape]), obs_feat.norm(dim=1).bool().float()])
         overall_coverages = torch.stack([cam_coverages[:cam + 1].max(dim=0)[0].mean()
@@ -171,6 +176,13 @@ class PerspectiveTrainer(object):
             res = torch.cat([torch.ones([count, 1]) * frame, pos[ids[:count]]], dim=1)
             moda, modp, precision, recall, stats = evaluateDetection_py(res, env.get_gt_array([frame]), [frame])
             modas[cam + 1] = moda
+        # diversity
+        action_history = torch.cat(action_history)
+        action_dist = ((self.action_mapping(action_history[:, None]) -
+                        self.action_mapping(action_history[None])) ** 2).sum(-1) ** 0.5
+        min_dist = torch.zeros([env.num_cam])
+        for i in range(1, env.num_cam):
+            min_dist[i] += torch.min(action_dist[i, :i])
         # use coverage, loss, or MODA as reward
         rewards = torch.zeros([env.num_cam])
         if 'maxcover' in self.args.reward:
@@ -183,8 +195,11 @@ class PerspectiveTrainer(object):
         if 'moda' in self.args.reward:
             # rewards += (modas[1:] - modas[:-1]) / 100
             rewards[-1] += modas[-1] / 100  # final step
+        # encourage each action to be more dis-similar
+        if 'div' in self.args.reward:
+            rewards += min_dist * 0.01
 
-        return rewards, (overall_coverages, task_losses[-1].item(), modas[-1].item()), world_heatmap
+        return rewards, (overall_coverages, task_losses[-1].item(), modas[-1].item(), min_dist), world_heatmap
 
     def train_rl(self, env, optimizer):
         # flatten the batch
@@ -227,6 +242,9 @@ class PerspectiveTrainer(object):
         # else, the index should be -1
         b_feat_inds = (idx_lookup[:, None].repeat(1, env.num_cam) + idx_add_table[b_step]) * (
                 idx_add_table[b_step] <= 0) - (idx_add_table[b_step] > 0)
+        # idx for action_history
+        idx_add_table = np.arange(env.num_cam)[None, :] - np.arange(env.num_cam)[:, None]
+        b_action_history_inds = torch.arange(N)[:, None].repeat([1, env.num_cam]) + idx_add_table[b_step]
         clipfracs = []
         # Optimizing the policy and value network
         for epoch in range(self.args.rl_update_epochs):
@@ -237,7 +255,7 @@ class PerspectiveTrainer(object):
                 action, newvalue, probs = self.agent.get_action_and_value((b_cam_feat[b_feat_inds[mb_inds]].cuda(),
                                                                            b_configs[mb_inds],
                                                                            b_step[mb_inds]),
-                                                                          b_actions[mb_inds])
+                                                                          b_actions[mb_inds].cuda())
                 newlogprob = probs.log_prob(action).sum(-1)
                 logratio = newlogprob - b_logprobs[mb_inds].cuda()
                 ratio = logratio.exp()
@@ -272,12 +290,24 @@ class PerspectiveTrainer(object):
 
                 # https://arxiv.org/pdf/2006.05990.pdf
                 # section B.8
-                entropy_loss = (probs.entropy()
-                                # + expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale],
-                                #               lambda x: torch.log(4 / (torch.exp(x) + torch.exp(-x)) ** 2),
-                                #               device='cuda')
+                entropy_loss = (probs.entropy() +
+                                expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale],
+                                            tanh_prime, device='cuda')
                                 ).sum(-1).mean()
-                loss = pg_loss - self.args.ent_coef * entropy_loss + v_loss * self.args.vf_coef
+
+                # div loss
+                mb_action_history = b_actions[b_action_history_inds[mb_inds]].cuda()
+                action_dist = ((self.action_mapping(probs.loc[:, None]) -
+                                self.action_mapping(mb_action_history)) ** 2).sum(-1) ** 0.5
+                min_dist = torch.zeros([self.args.rl_minibatch_size]).cuda()
+                for i in range(self.args.rl_minibatch_size):
+                    step = b_step[mb_inds][i].item()
+                    if step > 0:
+                        min_dist[i] += torch.min(action_dist[i, :step])
+                div_loss = torch.clamp(min_dist, 0, self.args.div_clamp).mean()
+
+                loss = pg_loss - self.args.ent_coef * entropy_loss + v_loss * self.args.vf_coef - \
+                       div_loss * self.args.div_coef
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -301,12 +331,13 @@ class PerspectiveTrainer(object):
         self.writer.add_scalar("losses/approx_kl", approx_kl.item(), self.rl_global_step)
         self.writer.add_scalar("losses/clipfrac", np.mean(clipfracs), self.rl_global_step)
         self.writer.add_scalar("losses/explained_variance", explained_var, self.rl_global_step)
-        # self.writer.add_scalar("charts/SPS", int(self.rl_global_step / (time.time() - self.start_time)),
-        #                        self.rl_global_step)
+        self.writer.add_scalar("losses/action_dist", min_dist.mean().item(), self.rl_global_step)
+        self.writer.add_scalar("losses/div_loss", div_loss.item(), self.rl_global_step)
 
         with np.printoptions(formatter={'float': '{: 0.3f}'.format}):
             # action_space = env.base.env.opts['env_action_space'].split('-')
             print(f'v loss: {v_loss.item():.3f}, p loss: {pg_loss.item():.3f}, ent: {entropy_loss.item():.3f}, '
+                  f'action dist: {min_dist.mean().item():.3f}, div loss: {div_loss.item():.3f}, '
                   f'avg return: {b_returns.mean().item():.3f}')
             if torch.where(b_step[mb_inds] == 0)[0].numel():
                 idx = torch.where(b_step[mb_inds] == 0)[0][0].item()

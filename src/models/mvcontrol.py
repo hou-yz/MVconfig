@@ -23,6 +23,15 @@ def create_pos_embedding(L, hidden_dim=128, temperature=10000, ):
     return pe
 
 
+def tanh_prime(x, thres=20):
+    # tanh'(x) = torch.log(4 / (torch.exp(x) + torch.exp(-x)) ** 2))
+    output = np.log(4) - 2 * torch.log(torch.exp(x) + torch.exp(-x))
+    # For numerical stability the implementation reverts to the linear function when |x| > thres
+    output[x > thres] = np.log(4) - 2 * x[x > thres]
+    output[x < -thres] = np.log(4) + 2 * x[x < -thres]
+    return output
+
+
 def expectation(probs, x_range, func, n_points=1000, device='cpu'):
     if isinstance(x_range[0], float):
         B, C = 1, 1
@@ -105,7 +114,7 @@ class CamControl(nn.Module):
 
         # output head
         action_param = self.actor(x)
-        action_mean = torch.tanh(action_param[:, 0::2])
+        action_mean = action_param[:, 0::2]
         action_std = F.softplus(action_param[:, 1::2] + np.log(np.exp(self.actstd_init) - 1))
         if not self.training and deterministic:
             # remove randomness during evaluation when deterministic=True
@@ -139,20 +148,20 @@ if __name__ == '__main__':
     # model.eval()
 
     state = (torch.randn([B, N, C, H, W]), torch.randn([B, N, dataset.config_dim]), torch.randint(0, N, [B]))
-    t0 = time.time()
-    for _ in tqdm.tqdm(range(10)):
-        # with torch.no_grad():
-        model.get_action_and_value(state)
-    print(time.time() - t0)
+    # t0 = time.time()
+    # for _ in tqdm.tqdm(range(10)):
+    #     # with torch.no_grad():
+    #     model.get_action_and_value(state)
+    # print(time.time() - t0)
 
-    mu, sigma = torch.randn([B, dataset.config_dim]), torch.rand([B, dataset.config_dim])
+    mu, sigma = torch.zeros([B, dataset.config_dim]), \
+        torch.linspace(0.1, 10, B)[:, None].repeat([1, dataset.config_dim])
     probs = Normal(mu, sigma)
     z1 = expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale],
                      lambda x: -torch.stack([probs.log_prob(x[:, :, i]) for i in range(x.shape[-1])], dim=2))
     t0 = time.time()
     for _ in tqdm.tqdm(range(100)):
-        z2 = expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale],
-                         lambda x: torch.log(4 / (torch.exp(x) + torch.exp(-x)) ** 2))
+        z2 = expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale], tanh_prime)
     print(time.time() - t0)
 
     # tgt = torch.randn([B, 1, C])
