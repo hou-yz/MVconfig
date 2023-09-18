@@ -8,8 +8,8 @@ import math
 import carla
 import cv2
 import gym
-from gym import spaces
 import numpy as np
+import torch
 import matplotlib.pyplot as plt
 from src.environment.cameras import build_cam
 from src.environment.utils import loc_dist, pflat
@@ -63,26 +63,24 @@ def encode_camera_cfg(cfg, opts):
 
 
 def decode_camera_cfg(cfg, opts):
+    device = cfg.device if isinstance(cfg, torch.Tensor) else 'cpu'
     # action is for a SINGLE camera
     # convert cfg: location/rotation/fov from [-1, 1] to different ranges
-    [x, y, z, pitch, yaw, roll, fov] = cfg
+    # [x, y, z, pitch, yaw, roll, fov] = cfg
     # location
     # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
     x_min, x_max, y_min, y_max, z_min, z_max = opts["spawn_area"]
-    x = (x + 1) / 2 * (x_max - x_min) + x_min
-    y = (y + 1) / 2 * (y_max - y_min) + y_min
-    z = (z + 1) / 2 * (z_max - z_min) + z_min
-    location = np.array([x, y, z])
+    cfg[0] = (cfg[0] + 1) / 2 * (x_max - x_min) + x_min
+    cfg[1] = (cfg[1] + 1) / 2 * (y_max - y_min) + y_min
+    cfg[2] = (cfg[2] + 1) / 2 * (z_max - z_min) + z_min
     # rotation
     # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
-    pitch = pitch * 90
-    yaw = yaw * 180
-    roll = roll * 180
-    rotation = np.array([pitch, yaw, roll])
+    cfg[3] = cfg[3] * 90
+    cfg[4] = cfg[4] * 180
+    cfg[5] = cfg[5] * 180
     # fov \in [0, 180]
-    fov = np.array((fov + 1) * 90).reshape(-1)
+    cfg[6] = (cfg[6] + 1) * 90
     # put location, rotation, fov together
-    cfg = np.concatenate([location, rotation, fov])
     return cfg
 
 
@@ -175,23 +173,24 @@ class CarlaCameraSeqEnv(gym.Env):
         self.pedestrian_bps = self.world.get_blueprint_library().filter("walker.pedestrian.*")
         self.walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
 
-    def action(self, act):
+    def action(self, act, cam):
+        device = act.device if isinstance(act, torch.Tensor) else 'cpu'
         # camera config for the next camera
         # allow more flexible choice of action space (x-y-z-pitch-yaw-roll-fov)
         # convert normalised action space to unnormalised ones
+        if not isinstance(act, torch.Tensor):
+            act = torch.tensor(act, dtype=torch.float, device=device)
         action_dim_dict = {'x': 0, 'y': 1, 'z': 2, 'pitch': 3, 'yaw': 4, 'roll': 5, 'fov': 6}
-        _action = np.zeros(self.config_dim)
+        _action = torch.zeros(self.config_dim, device=device)
         for i, action_name in enumerate(self.action_names):
             _action[action_dim_dict[action_name]] = act[i]
-        _action = np.clip(_action, -1, 1)
+        _action = torch.clamp(_action, -1, 1)
         _cfg = decode_camera_cfg(_action, self.opts)
         _location, _rotation, _fov = _cfg[:3], _cfg[3:6], _cfg[6]
-        # have seen self.step_counter cameras
-        cam = self.step_counter - 1
         # default settings for limited action space
-        location, rotation, fov = np.array(self.opts["cam_pos_lst"])[cam], \
-            np.array(self.opts["cam_dir_lst"])[cam], \
-            np.array(self.opts["cam_fov"]).reshape([1])
+        location, rotation, fov = torch.tensor(self.opts["cam_pos_lst"], device=device)[cam], \
+            torch.tensor(self.opts["cam_dir_lst"], device=device)[cam], \
+            torch.tensor(self.opts["cam_fov"], device=device).reshape([-1])
         if 'x' in self.action_names: location[0] = _location[0]
         if 'y' in self.action_names: location[1] = _location[1]
         if 'z' in self.action_names: location[2] = _location[2]
@@ -200,7 +199,7 @@ class CarlaCameraSeqEnv(gym.Env):
         if 'roll' in self.action_names: rotation[2] = _rotation[2]
         if 'fov' in self.action_names: fov = _fov
 
-        action = np.concatenate([location, rotation, fov], axis=0)
+        action = torch.cat([location, rotation, fov])
         return action
 
     def reset(self, seed=None, motion=False):
@@ -234,17 +233,16 @@ class CarlaCameraSeqEnv(gym.Env):
         return observation, info
 
     def step(self, action):
-        self.step_counter += 1
+        # Perform one step in the environment based on the given action
+        # have seen self.step_counter cameras
+        cam = self.step_counter
+        action = self.action(action, cam).numpy().tolist()
         # the input action would be an array of 7 numbers, as defined in action space
         # values are in the range of 0-1
-        # Perform one step in the environment based on the given action
-        action = self.action(action)
         loc = carla.Location(*action[:3])
         rot = carla.Rotation(*action[3:6])
         fov = action[6]
         new_transform = carla.Transform(loc, rot)
-        # have seen self.step_counter cameras
-        cam = self.step_counter - 1
         if float(self.cameras[cam].attributes["fov"]) != fov:
             # change camera fov, first destroy the old camera
             self.cameras[cam].destroy()
@@ -266,6 +264,7 @@ class CarlaCameraSeqEnv(gym.Env):
 
         time.sleep(SLEEP_TIME)
 
+        self.step_counter += 1
         # Update the state, calculate the reward, and check for termination
         # Set the current observation
         observation = {
@@ -574,8 +573,8 @@ def get_camera_config(image_w, image_h, loc, rot, fov):
         "y": loc.y,
         "z": loc.z,
         "pitch": rot.pitch,
-        "roll": rot.roll,
         "yaw": rot.yaw,
+        "roll": rot.roll,
         "f": f,
         "Cx": Cx,
         "Cy": Cy,

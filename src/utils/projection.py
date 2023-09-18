@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 
 def project_2d_points(project_mat, input_points):
@@ -25,11 +26,14 @@ def get_imagecoord_from_worldcoord(world_coord, intrinsic_mat, extrinsic_mat, z=
 
 
 def get_imgcoord_from_worldcoord_mat(intrinsic_mat, extrinsic_mat, z=0):
+    device = intrinsic_mat.device if isinstance(intrinsic_mat, torch.Tensor) else 'cpu'
     """image of shape C,H,W (C,N_row,N_col); xy indexging; x,y (w,h) (n_col,n_row)
     world of shape N_row, N_col; indexed as specified in the dataset attribute (xy or ij)
     z in meters by default
     """
-    threeD2twoD = np.array([[1, 0, 0], [0, 1, 0], [0, 0, z], [0, 0, 1]])
+    if not isinstance(intrinsic_mat, torch.Tensor):
+        intrinsic_mat, extrinsic_mat = torch.tensor(intrinsic_mat), torch.tensor(extrinsic_mat)
+    threeD2twoD = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, z], [0, 0, 1]], device=device)
     project_mat = intrinsic_mat @ extrinsic_mat @ threeD2twoD
     return project_mat
 
@@ -39,5 +43,5 @@ def get_worldcoord_from_imgcoord_mat(intrinsic_mat, extrinsic_mat, z=0):
     world of shape N_row, N_col; indexed as specified in the dataset attribute (xy or ij)
     z in meters by default
     """
-    project_mat = np.linalg.inv(get_imgcoord_from_worldcoord_mat(intrinsic_mat, extrinsic_mat, z))
+    project_mat = torch.inverse(get_imgcoord_from_worldcoord_mat(intrinsic_mat, extrinsic_mat, z))
     return project_mat

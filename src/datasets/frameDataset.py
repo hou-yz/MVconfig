@@ -122,7 +122,10 @@ class frameDataset(VisionDataset):
             self.action_names = base.env.action_names if interactive else None
         else:
             # get camera matrices
-            self.proj_mats = self.get_world_imgs_trans()
+            self.proj_mats = torch.stack([self.get_world_imgs_trans(self.base.intrinsic_matrices[cam],
+                                                                    self.base.extrinsic_matrices[cam])
+                                          for cam in range(self.num_cam)])
+
             # get image & world coverage masks
             # world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
             # self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')
@@ -236,23 +239,20 @@ class frameDataset(VisionDataset):
             img_bboxs[cam], img_pids[cam] = np.array(img_bboxs[cam]), np.array(img_pids[cam])
         return np.array(world_pts), np.array(world_lwh), np.array(world_pids), img_bboxs, img_pids
 
-    def get_world_imgs_trans(self, z=0):
+    def get_world_imgs_trans(self, intrinsic, extrinsic, z=0):
+        device = intrinsic.device if isinstance(intrinsic, torch.Tensor) else 'cpu'
         # image and world feature maps from xy indexing, change them into world (xy/ij) indexing / image (xy) indexing
         world_zoom_mat = np.diag([1 / self.world_reduce, 1 / self.world_reduce, 1])
         Rworldgrid_from_worldcoord = world_zoom_mat @ \
                                      self.base.world_indexing_from_xy_mat @ \
                                      np.linalg.inv(self.base.worldcoord_from_worldgrid_mat)
+        Rworldgrid_from_worldcoord = torch.tensor(Rworldgrid_from_worldcoord, dtype=torch.float, device=device)
 
         # z in meters by default
         # projection matrices: img feat -> world feat
-        worldcoord_from_imgcoord = [get_worldcoord_from_imgcoord_mat(self.base.intrinsic_matrices[cam],
-                                                                     self.base.extrinsic_matrices[cam],
-                                                                     z / self.base.worldcoord_unit)
-                                    for cam in range(self.num_cam)]
+        worldcoord_from_imgcoord = get_worldcoord_from_imgcoord_mat(intrinsic, extrinsic, z / self.base.worldcoord_unit)
         # worldgrid(xy)_from_img(xy)
-        Rworldgrid_from_imgcoord = torch.stack([torch.from_numpy(Rworldgrid_from_worldcoord @
-                                                                 worldcoord_from_imgcoord[cam]).float()
-                                                for cam in range(self.num_cam)])
+        Rworldgrid_from_imgcoord = Rworldgrid_from_worldcoord @ worldcoord_from_imgcoord
         return Rworldgrid_from_imgcoord
 
     def __getitem__(self, index, visualize=False):
@@ -262,7 +262,9 @@ class frameDataset(VisionDataset):
             self.base.intrinsic_matrices, self.base.extrinsic_matrices = \
                 self.base.env.camera_intrinsics, self.base.env.camera_extrinsics
             # get camera matrices
-            self.proj_mats = self.get_world_imgs_trans()
+            self.proj_mats = torch.stack([self.get_world_imgs_trans(self.base.intrinsic_matrices[cam],
+                                                                    self.base.extrinsic_matrices[cam])
+                                          for cam in range(self.num_cam)])
             # get image & world coverage masks
             # world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
             # self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')
@@ -305,7 +307,9 @@ class frameDataset(VisionDataset):
         # get camera matrices
         self.base.intrinsic_matrices, self.base.extrinsic_matrices = \
             self.base.env.camera_intrinsics, self.base.env.camera_extrinsics
-        self.proj_mats = self.get_world_imgs_trans()
+        self.proj_mats = torch.stack([self.get_world_imgs_trans(self.base.intrinsic_matrices[cam],
+                                                                self.base.extrinsic_matrices[cam])
+                                      for cam in range(self.num_cam)])
         # get image & world coverage masks
         world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
         self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')

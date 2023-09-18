@@ -11,6 +11,7 @@ from scipy.linalg import null_space
 from pathlib import Path
 import json
 import numpy as np
+import torch
 
 from .utils import pflat
 
@@ -38,42 +39,97 @@ from .utils import pflat
 
 #     return cameras
 
+def action2proj_mat(dataset, act, cam, M=None):
+    device = act.device if isinstance(act, torch.Tensor) else 'cpu'
+    action = dataset.base.env.action(act, cam)
+    [x, y, z, pitch, yaw, roll, fov] = action
 
-def build_cam(x, y, z, pitch, roll, yaw, f, Cx, Cy):
-    flip = np.array([[0, 1, 0], [0, 0, -1], [1, 0, 0]], dtype=np.float32)
+    image_h, image_w = dataset.img_shape
+    f = image_w / (2.0 * torch.tan(torch.deg2rad(fov) / 2))
+    Cx = image_w / 2.0
+    Cy = image_h / 2.0
 
-    K = np.array([[f, 0, Cx], [0, f, Cy], [0, 0, 1]], dtype=np.float64)
+    _, K, Rt = build_cam(x, y, z, pitch, yaw, roll, f, Cx, Cy)
 
-    c_y = np.cos(np.radians(yaw))
-    s_y = np.sin(np.radians(yaw))
-    c_r = np.cos(np.radians(roll))
-    s_r = np.sin(np.radians(roll))
-    c_p = np.cos(np.radians(pitch))
-    s_p = np.sin(np.radians(pitch))
-    matrix = np.identity(4)
-    matrix[0, 3] = x
-    matrix[1, 3] = y
-    matrix[2, 3] = z
-    matrix[0, 0] = c_p * c_y
-    matrix[0, 1] = c_y * s_p * s_r - s_y * c_r
-    matrix[0, 2] = -c_y * s_p * c_r - s_y * s_r
-    matrix[1, 0] = s_y * c_p
-    matrix[1, 1] = s_y * s_p * s_r + c_y * c_r
-    matrix[1, 2] = -s_y * s_p * c_r + c_y * s_r
-    matrix[2, 0] = s_p
-    matrix[2, 1] = -c_p * s_r
-    matrix[2, 2] = c_p * c_r
-    matrix = np.linalg.inv(matrix)
+    proj_mat = dataset.get_world_imgs_trans(K, Rt)
 
-    extrinsic_mat = flip @ matrix[:3, :]
-    P = K @ extrinsic_mat
+    inverse_aug_mats = torch.inverse(M) if M is not None else torch.eye(3, device=device)
+    # image and world feature maps from xy indexing, change them into world indexing / xy indexing (img)
+    imgcoord_from_Rimggrid_mat = inverse_aug_mats @ \
+                                 torch.diag(torch.tensor([dataset.img_reduce, dataset.img_reduce, 1],
+                                                         dtype=torch.float, device=device))
+    proj_mat = proj_mat @ imgcoord_from_Rimggrid_mat
+    return proj_mat
 
-    # Verify that camera's translation is correct
-    # cen = np.array([x, y, z, 1]).reshape((4, 1))
-    # C = pflat(null_space(P))
-    # assert np.allclose(C, cen)
 
-    return P, K, extrinsic_mat
+def build_cam(x, y, z, pitch, yaw, roll, f, Cx, Cy):
+    is_float = isinstance(x, float)
+    device = x.device if isinstance(x, torch.Tensor) else 'cpu'
+    B = 1 if is_float else x.numel()
+    # New we must change from UE4's coordinate system to an "standard"
+    # (x, y ,z) -> (y, -z, x)
+    flip = torch.zeros([B, 3, 3], device=device)
+    flip[:, 0, 1] = 1
+    flip[:, 1, 2] = -1
+    flip[:, 2, 0] = 1
+
+    # intrinsic
+    K = torch.zeros([B, 3, 3], device=device)
+    K[:, 0, 0] = f
+    K[:, 0, 2] = Cx
+    K[:, 1, 1] = f
+    K[:, 1, 2] = Cy
+    K[:, 2, 2] = 1
+
+    # Let t_c be a column vector describing the location of the camera-center in world coordinates, and let R_c
+    #  be the rotation matrix describing the camera's orientation with respect to the world coordinate axes
+
+    # Translation
+    t_c = torch.zeros([B, 3], device=device)
+    t_c[:, 0] = x
+    t_c[:, 1] = y
+    t_c[:, 2] = z
+
+    # Rotation
+    # https://en.wikipedia.org/wiki/Rotation_matrix
+    # https://github.com/carla-simulator/carla/issues/2516#issuecomment-861761770
+    # Carla performs negative roll, then negative pitch, then yaw.
+    pitch_ = -torch.deg2rad(torch.tensor(pitch, device=device) if not isinstance(pitch, torch.Tensor) else pitch)
+    R_pitch = torch.zeros([B, 3, 3], device=device)
+    R_pitch[:, 0, 0] = torch.cos(pitch_)
+    R_pitch[:, 0, 2] = torch.sin(pitch_)
+    R_pitch[:, 1, 1] = 1
+    R_pitch[:, 2, 0] = -torch.sin(pitch_)
+    R_pitch[:, 2, 2] = torch.cos(pitch_)
+    yaw_ = torch.deg2rad(torch.tensor(yaw, device=device) if not isinstance(yaw, torch.Tensor) else yaw)
+    R_yaw = torch.zeros([B, 3, 3], device=device)
+    R_yaw[:, 0, 0] = torch.cos(yaw_)
+    R_yaw[:, 0, 1] = -torch.sin(yaw_)
+    R_yaw[:, 1, 0] = torch.sin(yaw_)
+    R_yaw[:, 1, 1] = torch.cos(yaw_)
+    R_yaw[:, 2, 2] = 1
+    roll_ = -torch.deg2rad(torch.tensor(roll, device=device) if not isinstance(roll, torch.Tensor) else roll)
+    R_roll = torch.zeros([B, 3, 3], device=device)
+    R_roll[:, 0, 0] = 1
+    R_roll[:, 1, 1] = torch.cos(roll_)
+    R_roll[:, 1, 2] = -torch.sin(roll_)
+    R_roll[:, 2, 1] = torch.sin(roll_)
+    R_roll[:, 2, 2] = torch.cos(roll_)
+    R_c = R_yaw @ R_pitch @ R_roll
+    # The transformation matrix that describes the camera's pose is then [R_c|t_c].
+    Rt_c = torch.zeros([B, 4, 4], device=device)
+    Rt_c[:, :3, :3] = R_c
+    Rt_c[:, :3, 3] = t_c
+    Rt_c[:, 3, 3] = 1
+    # Then the extrinsic matrix is obtained by inverting the camera's pose matrix:
+    # https://ksimek.github.io/2012/08/22/extrinsic/
+    Rt = flip @ torch.inverse(Rt_c)[:, :3]
+    P = K @ Rt
+
+    if is_float:
+        P, K, Rt = P[0].numpy(), K[0].numpy(), Rt[0].numpy()
+
+    return P, K, Rt
 
 
 def build_cam_from_configs(cam_config, scene_config):
