@@ -32,6 +32,30 @@ def tanh_prime(x, thres=20):
     return output
 
 
+def dist_action(act1, act2, action_names):
+    dist_ = None
+    if 'x' in action_names and 'y' in action_names:
+        idx = [action_names.index('x'), action_names.index('y')]
+        xy1, xy2 = act1[..., idx], act2[..., idx]
+        dist_loc_ = dist_location(xy1, xy2)
+        dist_ = dist_ + dist_loc_ if dist_ is not None else dist_loc_
+    if 'yaw' in action_names:
+        idx = action_names.index('yaw')
+        yaw1, yaw2 = act1[..., idx], act2[..., idx]
+        dist_rot_ = dist_rotation(yaw1, yaw2)
+        dist_ = dist_ + dist_rot_ if dist_ is not None else dist_rot_
+    return dist_
+
+
+def dist_location(xy1, xy2):
+    return ((xy1 - xy2) ** 2).sum(-1) ** 0.5
+
+
+def dist_rotation(yaw1, yaw2):
+    angle = torch.abs(yaw1 * 180 - yaw2 * 180)
+    return torch.min(angle, 360 - angle) / 180
+
+
 def expectation(probs, x_range, func, n_points=1000, device='cpu'):
     if isinstance(x_range[0], float):
         B, C = 1, 1
@@ -85,7 +109,7 @@ class CamControl(nn.Module):
                                     layer_init(nn.Linear(hidden_dim, 1), std=1.0))
         self.actor = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
                                    layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
-                                   layer_init(nn.Linear(hidden_dim, dataset.action_dim * 2), std=0.01))
+                                   layer_init(nn.Linear(hidden_dim, len(dataset.action_names) * 2), std=0.01))
         self.actstd_init = actstd_init
 
     def get_value(self, state):
@@ -140,9 +164,18 @@ if __name__ == '__main__':
 
     B, N, C, H, W = 32, 4, 128, 200, 200
     dataset = Object()
+    dataset.interactive = True
     dataset.config_dim = 7
-    dataset.action_dim = 2
+    dataset.action_space = ['x', 'y', 'z', 'pitch', 'yaw']
     dataset.num_cam = 4
+
+    xy1, xy2 = torch.randn([7, 2]), torch.randn([10, 2])
+    dist_loc = dist_location(xy1[:, None], xy2[None])
+    yaw1 = torch.tensor([0, 30, 45, 60, 90, 120, 180]) / 180
+    yaw2 = torch.tensor([0, 15, 30, 60, 90, 150, 180, -120, -60, -180]) / 180
+    dist_rot = dist_rotation(yaw1[:, None], yaw2[None])
+
+    dist_action(torch.randn([7, 1, 5]), torch.randn([1, 10, 5]), dataset.action_space)
 
     model = CamControl(dataset, C, )
     # model.eval()

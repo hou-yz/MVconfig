@@ -92,7 +92,7 @@ def main(args):
     # logging
     RL_settings = f'RL_{args.carla_cfg}_{args.reward}_{"C" if args.control_arch == "conv" else "E"}_' \
                   f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
-                  f'stdinit{args.actstd_init}tanh_ent{args.ent_coef}_div{args.div_coef}_' \
+                  f'stdinit{args.actstd_init}tanh_ent{args.ent_coef}_div{args.div_coef}_coverONLY_' \
                   f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{RL_settings}' \
              f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
