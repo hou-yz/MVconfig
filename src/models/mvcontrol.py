@@ -100,7 +100,7 @@ if __name__ == '__main__':
     import tqdm
     from torchvision.models import vit_b_16
     from torchvision.models import vgg16, alexnet
-    from src.utils.tensor_utils import dist_action, dist_location, dist_rotation
+    from src.utils.tensor_utils import dist_action, dist_l2, dist_angle
 
 
     class Object(object):
@@ -115,10 +115,10 @@ if __name__ == '__main__':
     dataset.num_cam = 4
 
     xy1, xy2 = torch.randn([7, 2]), torch.randn([10, 2])
-    dist_loc = dist_location(xy1[:, None], xy2[None])
+    dist_loc = dist_l2(xy1[:, None], xy2[None])
     yaw1 = torch.tensor([0, 30, 45, 60, 90, 120, 180]) / 180
     yaw2 = torch.tensor([0, 15, 30, 60, 90, 150, 180, -120, -60, -180]) / 180
-    dist_rot = dist_rotation(yaw1[:, None], yaw2[None])
+    dist_rot = dist_angle(yaw1[:, None], yaw2[None])
 
     dist_action(torch.randn([7, 1, 5]), torch.randn([1, 10, 5]), dataset.action_space)
 

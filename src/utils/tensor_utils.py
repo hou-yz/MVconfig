@@ -2,26 +2,26 @@ import numpy as np
 import torch
 
 
-def dist_action(act1, act2, action_names):
+def dist_action(act1, act2, action_names, xy_coef=1.0, yaw_coef=1.0):
     dist_ = None
     if 'x' in action_names and 'y' in action_names:
         idx = [action_names.index('x'), action_names.index('y')]
         xy1, xy2 = act1[..., idx], act2[..., idx]
-        dist_loc_ = dist_location(xy1, xy2)
-        dist_ = dist_ + dist_loc_ if dist_ is not None else dist_loc_
+        dist_loc_ = dist_l2(xy1, xy2)
+        dist_ = dist_ + dist_loc_ * xy_coef if dist_ is not None else dist_loc_ * xy_coef
     if 'yaw' in action_names:
         idx = action_names.index('yaw')
         yaw1, yaw2 = act1[..., idx], act2[..., idx]
-        dist_rot_ = dist_rotation(yaw1, yaw2)
-        dist_ = dist_ + dist_rot_ if dist_ is not None else dist_rot_
+        dist_rot_ = dist_angle(yaw1, yaw2)
+        dist_ = dist_ + dist_rot_ * yaw_coef if dist_ is not None else dist_rot_ * yaw_coef
     return dist_
 
 
-def dist_location(xy1, xy2):
+def dist_l2(xy1, xy2):
     return ((xy1 - xy2) ** 2).sum(-1) ** 0.5
 
 
-def dist_rotation(yaw1, yaw2):
+def dist_angle(yaw1, yaw2):
     angle = torch.abs(yaw1 * 180 - yaw2 * 180)
     return torch.min(angle, 360 - angle) / 180
 
