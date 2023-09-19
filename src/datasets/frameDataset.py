@@ -13,6 +13,7 @@ import torchvision.transforms as T
 from torchvision.datasets import VisionDataset
 from src.utils.projection import *
 from src.utils.image_utils import draw_umich_gaussian, random_affine
+from src.utils.tensor_utils import to_tensor
 import matplotlib.pyplot as plt
 
 CONFIGS_PADDING_VALUE = -3
@@ -156,7 +157,8 @@ class frameDataset(VisionDataset):
                             # in_map = Rgrid_x < self.Rworld_shape[0] and Rgrid_y < self.Rworld_shape[1]
                             return visible and in_view
 
-                        grid_x, grid_y = self.base.get_worldgrid_from_pos(pedestrian['positionID']).squeeze()
+                        grid = self.base.get_worldgrid_from_pos(pedestrian['positionID']).squeeze()
+                        grid_x, grid_y = grid[0], grid[1]
                         for cam in range(self.num_cam):
                             if is_in_cam(cam, grid_x, grid_y):
                                 og_gt[cam].append(np.array([frame, grid_x, grid_y]))
@@ -196,7 +198,8 @@ class frameDataset(VisionDataset):
                 world_pts, world_pids = [], []
                 img_bboxs, img_pids = [[] for _ in range(self.num_cam)], [[] for _ in range(self.num_cam)]
                 for pedestrian in all_pedestrians:
-                    grid_x, grid_y = self.base.get_worldgrid_from_pos(pedestrian['positionID']).squeeze()
+                    grid = self.base.get_worldgrid_from_pos(pedestrian['positionID']).squeeze()
+                    grid_x, grid_y = grid[0], grid[1]
                     if pedestrian['personID'] not in pid_dict:
                         pid_dict[pedestrian['personID']] = len(pid_dict)
                     num_world_bbox += 1
@@ -228,7 +231,7 @@ class frameDataset(VisionDataset):
         for pedestrian in all_pedestrians:
             # world_pts.append([pedestrian["x"], pedestrian["y"], pedestrian["z"]])
             world_pts.append(self.base.get_worldgrid_from_worldcoord(
-                np.array([pedestrian["x"], pedestrian["y"]])[:, None])[:, 0])
+                np.array([pedestrian["x"], pedestrian["y"]])[None]).squeeze())
             world_lwh.append([pedestrian["l"], pedestrian["w"], pedestrian["h"]])
             world_pids.append(pedestrian["id"])
             for cam in range(self.num_cam):
@@ -243,10 +246,11 @@ class frameDataset(VisionDataset):
         device = intrinsic.device if isinstance(intrinsic, torch.Tensor) else 'cpu'
         # image and world feature maps from xy indexing, change them into world (xy/ij) indexing / image (xy) indexing
         world_zoom_mat = np.diag([1 / self.world_reduce, 1 / self.world_reduce, 1])
-        Rworldgrid_from_worldcoord = world_zoom_mat @ \
-                                     self.base.world_indexing_from_xy_mat @ \
-                                     np.linalg.inv(self.base.worldcoord_from_worldgrid_mat)
-        Rworldgrid_from_worldcoord = torch.tensor(Rworldgrid_from_worldcoord, dtype=torch.float, device=device)
+        Rworldgrid_from_worldcoord = to_tensor(world_zoom_mat @
+                                               self.base.world_indexing_from_xy_mat @
+                                               np.linalg.inv(self.base.worldcoord_from_worldgrid_mat),
+                                               dtype=torch.float,
+                                               device=device)
 
         # z in meters by default
         # projection matrices: img feat -> world feat
@@ -410,12 +414,7 @@ if __name__ == '__main__':
 
     with open('../../cfg/RL/1.cfg', "r") as fp:
         dataset_config = json.load(fp)
-    # dataset = frameDataset(CarlaX(dataset_config), split_ratio=(0.01, 0.1, 0.1))
     dataset = frameDataset(CarlaX(dataset_config, port=2100, tm_port=8100), interactive=True, seed=seed)
-    # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train')
-    # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train', semi_supervised=.1)
-    # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', semi_supervised=0.5)
-    # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train', semi_supervised=0.5)
     # min_dist = np.inf
     # for world_gt in dataset.world_gt.values():
     #     x, y = world_gt[0][:, 0], world_gt[0][:, 1]
@@ -424,19 +423,20 @@ if __name__ == '__main__':
     #         np.fill_diagonal(xy_dists, np.inf)
     #         min_dist = min(min_dist, np.min(xy_dists))
     #         pass
-    dataloader = DataLoader(dataset, 2, True, num_workers=0)
-    t0 = time.time()
-    # _ = next(iter(dataloader))
-    for i in range(20):
-        _ = dataset.__getitem__(i % len(dataset), visualize=True)
-        if dataset.base.__name__ == 'CarlaX' and dataset.interactive:
-            done = False
-            while not done:
-                _, done = dataset.step(np.random.randn(2), visualize=True)
-
-    print(time.time() - t0)
-    pass
-    if False:
+    # dataloader = DataLoader(dataset, 2, True, num_workers=0)
+    # t0 = time.time()
+    # # _ = next(iter(dataloader))
+    # for i in range(20):
+    #     _ = dataset.__getitem__(i % len(dataset), visualize=True)
+    #     if dataset.base.__name__ == 'CarlaX' and dataset.interactive:
+    #         done = False
+    #         while not done:
+    #             _, done = dataset.step(np.random.randn(2), visualize=True)
+    #
+    # print(time.time() - t0)
+    # pass
+    if True:
+        dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train')
         import matplotlib.pyplot as plt
         from src.utils.projection import get_worldcoord_from_imagecoord
 
@@ -445,10 +445,10 @@ if __name__ == '__main__':
         H, W = xx.shape
         image_coords = np.stack([xx, yy], axis=2).reshape([-1, 2])
         for cam in range(dataset.num_cam):
-            world_coords = get_worldcoord_from_imagecoord(image_coords.transpose(),
+            world_coords = get_worldcoord_from_imagecoord(image_coords,
                                                           dataset.base.intrinsic_matrices[cam],
                                                           dataset.base.extrinsic_matrices[cam])
-            world_grids = dataset.base.get_worldgrid_from_worldcoord(world_coords).transpose().reshape([H, W, 2])
+            world_grids = dataset.base.get_worldgrid_from_worldcoord(world_coords).reshape([H, W, 2])
             world_grid_map = np.zeros(dataset.worldgrid_shape)
             for i in range(H):
                 for j in range(W):

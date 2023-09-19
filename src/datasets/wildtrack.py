@@ -30,35 +30,39 @@ class Wildtrack(VisionDataset):
         self.intrinsic_matrices, self.extrinsic_matrices = zip(
             *[self.get_intrinsic_extrinsic_matrix(cam) for cam in range(self.num_cam)])
 
-    def get_worldgrid_from_pos(self, pos):
+    @staticmethod
+    def get_worldgrid_from_pos(pos):
         grid_x = pos % 480
         grid_y = pos // 480
-        return np.array([[grid_x], [grid_y]], dtype=int).reshape([2, -1])
+        return np.array([grid_x, grid_y])[None]
 
-    def get_pos_from_worldgrid(self, worldgrid):
-        grid_x, grid_y = worldgrid[0, :], worldgrid[1, :]
+    @staticmethod
+    def get_pos_from_worldgrid(grid):
+        grid_x, grid_y = grid[:, 0], grid[:, 1]
         return grid_x + grid_y * 480
 
-    def get_worldgrid_from_worldcoord(self, world_coord):
+    @staticmethod
+    def get_worldgrid_from_worldcoord(coord):
         # datasets default unit: centimeter & origin: (-300,-900)
-        coord_x, coord_y = world_coord[0, :], world_coord[1, :]
+        coord_x, coord_y = coord[:, 0], coord[:, 1]
         grid_x = (coord_x + 300) / 2.5
         grid_y = (coord_y + 900) / 2.5
-        return np.array([[grid_x], [grid_y]], dtype=int).reshape([2, -1])
+        return np.stack([grid_x, grid_y], axis=1).astype(int)
 
-    def get_worldcoord_from_worldgrid(self, worldgrid):
+    @staticmethod
+    def get_worldcoord_from_worldgrid(grid):
         # datasets default unit: centimeter & origin: (-300,-900)
-        grid_x, grid_y = worldgrid[0, :], worldgrid[1, :]
+        grid_x, grid_y = grid[:, 0], grid[:, 1]
         coord_x = -300 + 2.5 * grid_x
         coord_y = -900 + 2.5 * grid_y
-        return np.array([[coord_x], [coord_y]]).reshape([2, -1])
+        return np.stack([coord_x, coord_y], axis=1)
 
     def get_worldcoord_from_pos(self, pos):
         grid = self.get_worldgrid_from_pos(pos)
         return self.get_worldcoord_from_worldgrid(grid)
 
-    def get_pos_from_worldcoord(self, world_coord):
-        grid = self.get_worldgrid_from_worldcoord(world_coord)
+    def get_pos_from_worldcoord(self, coord):
+        grid = self.get_worldgrid_from_worldcoord(coord)
         return self.get_pos_from_worldgrid(grid)
 
     def get_intrinsic_extrinsic_matrix(self, camera_i):
@@ -98,8 +102,8 @@ def test():
             foot_wc = dataset.get_worldcoord_from_pos(pos)
             if bbox is None:
                 continue
-            foot_ic = np.array([[(bbox[0] + bbox[2]) / 2, bbox[3]]]).T
-            head_ic = np.array([[(bbox[0] + bbox[2]) / 2, bbox[1]]]).T
+            foot_ic = np.array([[(bbox[0] + bbox[2]) / 2, bbox[3]]])
+            head_ic = np.array([[(bbox[0] + bbox[2]) / 2, bbox[1]]])
             p_foot_wc = get_worldcoord_from_imagecoord(foot_ic, dataset.intrinsic_matrices[cam],
                                                        dataset.extrinsic_matrices[cam])
             p_head_wc = get_worldcoord_from_imagecoord(head_ic, dataset.intrinsic_matrices[cam],

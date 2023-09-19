@@ -1,18 +1,18 @@
 import numpy as np
 import torch
+from src.utils.tensor_utils import to_tensor
 
 
 def project_2d_points(project_mat, input_points):
-    vertical_flag = 0
-    if input_points.shape[1] == 2:
-        vertical_flag = 1
-        input_points = np.transpose(input_points)
-    input_points = np.concatenate([input_points, np.ones([1, input_points.shape[1]])], axis=0)
-    output_points = project_mat @ input_points
+    device = input_points.device if isinstance(input_points, torch.Tensor) else 'cpu'
+    project_mat, input_points = to_tensor(project_mat), to_tensor(input_points)
+    if input_points.dim() == 1: input_points = input_points[None]
+    # N points, each C=2 dimensions
+    N, C = input_points.shape
+    input_points = torch.cat([input_points, torch.ones([N, 1], device=device)], dim=1)
+    output_points = project_mat @ input_points.T
     output_points = output_points[:2, :] / output_points[2, :]
-    if vertical_flag:
-        output_points = np.transpose(output_points)
-    return output_points
+    return output_points.T
 
 
 def get_worldcoord_from_imagecoord(image_coord, intrinsic_mat, extrinsic_mat, z=0):
@@ -31,9 +31,8 @@ def get_imgcoord_from_worldcoord_mat(intrinsic_mat, extrinsic_mat, z=0):
     world of shape N_row, N_col; indexed as specified in the dataset attribute (xy or ij)
     z in meters by default
     """
-    if not isinstance(intrinsic_mat, torch.Tensor):
-        intrinsic_mat, extrinsic_mat = torch.tensor(intrinsic_mat), torch.tensor(extrinsic_mat)
-    threeD2twoD = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, z], [0, 0, 1]], device=device)
+    intrinsic_mat, extrinsic_mat = to_tensor(intrinsic_mat), to_tensor(extrinsic_mat)
+    threeD2twoD = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, z], [0, 0, 1]], dtype=torch.float, device=device)
     project_mat = intrinsic_mat @ extrinsic_mat @ threeD2twoD
     return project_mat
 

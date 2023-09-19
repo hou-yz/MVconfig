@@ -1,19 +1,8 @@
-"""
-    Copyright (C) 2022 Martin Ahrnbom
-    This work is released under the MIT License. 
-    See the file LICENSE for details
-
-    
-    A module for loading camera matrices from json files 
-"""
-
-from scipy.linalg import null_space
-from pathlib import Path
-import json
 import numpy as np
 import torch
 
 from .utils import pflat
+from src.utils.tensor_utils import to_tensor
 
 
 # def build_camera_matrices(folder: Path, output_K=False):
@@ -39,7 +28,7 @@ from .utils import pflat
 
 #     return cameras
 
-def action2proj_mat(dataset, act, cam, M=None):
+def action2proj_mat(dataset, act, cam):
     device = act.device if isinstance(act, torch.Tensor) else 'cpu'
     action = dataset.base.env.action(act, cam)
     [x, y, z, pitch, yaw, roll, fov] = action
@@ -53,12 +42,6 @@ def action2proj_mat(dataset, act, cam, M=None):
 
     proj_mat = dataset.get_world_imgs_trans(K, Rt)
 
-    inverse_aug_mats = torch.inverse(M) if M is not None else torch.eye(3, device=device)
-    # image and world feature maps from xy indexing, change them into world indexing / xy indexing (img)
-    imgcoord_from_Rimggrid_mat = inverse_aug_mats @ \
-                                 torch.diag(torch.tensor([dataset.img_reduce, dataset.img_reduce, 1],
-                                                         dtype=torch.float, device=device))
-    proj_mat = proj_mat @ imgcoord_from_Rimggrid_mat
     return proj_mat
 
 
@@ -94,21 +77,22 @@ def build_cam(x, y, z, pitch, yaw, roll, f, Cx, Cy):
     # https://en.wikipedia.org/wiki/Rotation_matrix
     # https://github.com/carla-simulator/carla/issues/2516#issuecomment-861761770
     # Carla performs negative roll, then negative pitch, then yaw.
-    pitch_ = -torch.deg2rad(torch.tensor(pitch, device=device) if not isinstance(pitch, torch.Tensor) else pitch)
+    pitch, yaw, roll = to_tensor(pitch), to_tensor(yaw), to_tensor(roll)
+    pitch_ = -torch.deg2rad(pitch)
     R_pitch = torch.zeros([B, 3, 3], device=device)
     R_pitch[:, 0, 0] = torch.cos(pitch_)
     R_pitch[:, 0, 2] = torch.sin(pitch_)
     R_pitch[:, 1, 1] = 1
     R_pitch[:, 2, 0] = -torch.sin(pitch_)
     R_pitch[:, 2, 2] = torch.cos(pitch_)
-    yaw_ = torch.deg2rad(torch.tensor(yaw, device=device) if not isinstance(yaw, torch.Tensor) else yaw)
+    yaw_ = torch.deg2rad(yaw)
     R_yaw = torch.zeros([B, 3, 3], device=device)
     R_yaw[:, 0, 0] = torch.cos(yaw_)
     R_yaw[:, 0, 1] = -torch.sin(yaw_)
     R_yaw[:, 1, 0] = torch.sin(yaw_)
     R_yaw[:, 1, 1] = torch.cos(yaw_)
     R_yaw[:, 2, 2] = 1
-    roll_ = -torch.deg2rad(torch.tensor(roll, device=device) if not isinstance(roll, torch.Tensor) else roll)
+    roll_ = -torch.deg2rad(roll)
     R_roll = torch.zeros([B, 3, 3], device=device)
     R_roll[:, 0, 0] = 1
     R_roll[:, 1, 1] = torch.cos(roll_)
@@ -143,7 +127,7 @@ def build_cam_from_configs(cam_config, scene_config):
     cam_values["Cx"] = Cx
     cam_values["Cy"] = Cy
     cam_values["f"] = f
-    return build_cam(cam_values)
+    return build_cam(**cam_values)
 
 
 def euler_angles(phi, theta, psi):

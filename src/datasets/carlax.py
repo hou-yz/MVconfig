@@ -36,15 +36,15 @@ class CarlaX(VisionDataset):
         self.intrinsic_matrices, self.extrinsic_matrices = self.env.camera_intrinsics, self.env.camera_extrinsics
 
     def get_worldgrid_from_worldcoord(self, world_coord):
-        coord_x, coord_y = world_coord[0, :], world_coord[1, :]
+        coord_x, coord_y = world_coord[:, 0], world_coord[:, 1]
         x_min, x_max, y_min, y_max, _, _ = self.env.opts["spawn_area"]
         grid_x = (coord_x - x_min) * self.env.opts["map_expand"]
         grid_y = (coord_y - y_min) * self.env.opts["map_expand"]
-        return np.array([grid_x, grid_y], dtype=int)
+        return np.stack([grid_x, grid_y], axis=1)
 
-    def get_worldcoord_from_worldgrid(self, worldgrid):
-        grid_x, grid_y = worldgrid[0, :], worldgrid[1, :]
+    def get_worldcoord_from_worldgrid(self, world_grid):
+        grid_x, grid_y = world_grid[:, 0], world_grid[:, 1]
         x_min, x_max, y_min, y_max, _, _ = self.env.opts["spawn_area"]
         coord_x = x_min + grid_x / self.env.opts["map_expand"]
         coord_y = y_min + grid_y / self.env.opts["map_expand"]
-        return np.array([coord_x, coord_y])
+        return np.stack([coord_x, coord_y], axis=1)
