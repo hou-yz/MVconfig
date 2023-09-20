@@ -95,18 +95,18 @@ class MVDet(MultiviewBase):
                                                 ).unsqueeze(0).repeat(B * N, 1, 1).float()
         proj_mats = proj_mats[:, :N].flatten(0, 1) @ imgcoord_from_Rimggrid_mat
 
-        if visualize:
-            denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-            proj_imgs = warp_perspective(F.interpolate(imgs, scale_factor=1 / 8), proj_mats.to(imgs.device),
-                                         self.Rworld_shape).unflatten(0, [B, N])
-            for cam in range(N):
-                visualize_img = T.ToPILImage()(denorm(imgs.detach())[cam * B])
-                # visualize_img.save(f'../../imgs/augimg{cam + 1}.png')
-                plt.imshow(visualize_img)
-                plt.show()
-                visualize_img = T.ToPILImage()(denorm(proj_imgs.detach())[0, cam])
-                plt.imshow(visualize_img)
-                plt.show()
+        # if visualize:
+        #     denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+        #     proj_imgs = warp_perspective(F.interpolate(imgs, scale_factor=1 / 8), proj_mats.to(imgs.device),
+        #                                  self.Rworld_shape).unflatten(0, [B, N])
+        #     for cam in range(N):
+        #         visualize_img = T.ToPILImage()(denorm(imgs.detach())[cam * B])
+        #         # visualize_img.save(f'../../imgs/augimg{cam + 1}.png')
+        #         plt.imshow(visualize_img)
+        #         plt.show()
+        #         visualize_img = T.ToPILImage()(denorm(proj_imgs.detach())[0, cam])
+        #         plt.imshow(visualize_img)
+        #         plt.show()
 
         imgs_feat = self.base(imgs)
         imgs_feat = self.bottleneck(imgs_feat)
@@ -116,12 +116,12 @@ class MVDet(MultiviewBase):
         imgs_offset = self.img_offset(imgs_feat)
         imgs_wh = self.img_wh(imgs_feat)
 
-        if visualize:
-            for cam in range(N):
-                visualize_img = array2heatmap(torch.norm(imgs_feat[cam * B].detach(), dim=0).cpu())
-                # visualize_img.save(f'../../imgs/augimgfeat{cam + 1}.png')
-                plt.imshow(visualize_img)
-                plt.show()
+        # if visualize:
+        #     for cam in range(N):
+        #         visualize_img = array2heatmap(torch.norm(imgs_feat[cam * B].detach(), dim=0).cpu())
+        #         # visualize_img.save(f'../../imgs/augimgfeat{cam + 1}.png')
+        #         plt.imshow(visualize_img)
+        #         plt.show()
 
         # world feat
         world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device), self.Rworld_shape).unflatten(0, [B, N])
@@ -169,13 +169,13 @@ if __name__ == '__main__':
     from src.utils.decode import ctdet_decode
     from thop import profile
 
-    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', augmentation=True)
+    dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')))
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
 
     model = MVDet(dataset).cuda()
     (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) = next(iter(dataloader))
     model.train()
-    (world_heatmap, world_offset), _, cam_train = model(imgs.cuda(), aug_mats, proj_mats, 2)
+    (world_heatmap, world_offset), _ = model(imgs.cuda(), aug_mats, proj_mats, True)
     xysc_train = ctdet_decode(world_heatmap, world_offset)
     # macs, params = profile(model, inputs=(imgs[:, :3].cuda(), aug_mats[:, :3].contiguous()))
     # macs, params = profile(model.select_module, inputs=(torch.randn([1, 128, 160, 250]).cuda(),
