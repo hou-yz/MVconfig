@@ -91,7 +91,7 @@ class frameDataset(VisionDataset):
         self.Rworld_shape = list(map(lambda x: x // self.world_reduce, self.worldgrid_shape))
         self.Rimg_shape = np.ceil(np.array(self.img_shape) / self.img_reduce).astype(int).tolist()
 
-        # world_grid (projected feature map) <- rule -> world_coord <- K,Rt -> image coord
+        # world_grid (projected feature map) <- coordinate translation -> world_coord <- camera matrix -> image coord
         self.Rworldgrid_from_worldcoord = np.linalg.inv(self.base.worldcoord_from_worldgrid_mat @
                                                         np.diag([self.world_reduce, self.world_reduce, 1]))
 
