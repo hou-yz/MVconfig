@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from .utils import pflat
+# from .utils import pflat
 from src.utils.tensor_utils import to_tensor
 
 
@@ -29,7 +29,6 @@ from src.utils.tensor_utils import to_tensor
 #     return cameras
 
 def action2proj_mat(dataset, act, cam):
-    device = act.device if isinstance(act, torch.Tensor) else 'cpu'
     action = dataset.base.env.action(act, cam)
     [x, y, z, pitch, yaw, roll, fov] = action
 
@@ -48,30 +47,29 @@ def action2proj_mat(dataset, act, cam):
 def build_cam(x, y, z, pitch, yaw, roll, f, Cx, Cy):
     is_float = isinstance(x, float)
     device = x.device if isinstance(x, torch.Tensor) else 'cpu'
-    B = 1 if is_float else x.numel()
     # New we must change from UE4's coordinate system to an "standard"
     # (x, y ,z) -> (y, -z, x)
-    flip = torch.zeros([B, 3, 3], device=device)
-    flip[:, 0, 1] = 1
-    flip[:, 1, 2] = -1
-    flip[:, 2, 0] = 1
+    flip = torch.zeros([3, 3], device=device)
+    flip[0, 1] = 1
+    flip[1, 2] = -1
+    flip[2, 0] = 1
 
     # intrinsic
-    K = torch.zeros([B, 3, 3], device=device)
-    K[:, 0, 0] = f
-    K[:, 0, 2] = Cx
-    K[:, 1, 1] = f
-    K[:, 1, 2] = Cy
-    K[:, 2, 2] = 1
+    K = torch.zeros([3, 3], device=device)
+    K[0, 0] = f
+    K[0, 2] = Cx
+    K[1, 1] = f
+    K[1, 2] = Cy
+    K[2, 2] = 1
 
     # Let t_c be a column vector describing the location of the camera-center in world coordinates, and let R_c
     #  be the rotation matrix describing the camera's orientation with respect to the world coordinate axes
 
     # Translation
-    t_c = torch.zeros([B, 3], device=device)
-    t_c[:, 0] = x
-    t_c[:, 1] = y
-    t_c[:, 2] = z
+    t_c = torch.zeros([3], device=device)
+    t_c[0] = x
+    t_c[1] = y
+    t_c[2] = z
 
     # Rotation
     # https://en.wikipedia.org/wiki/Rotation_matrix
@@ -79,39 +77,38 @@ def build_cam(x, y, z, pitch, yaw, roll, f, Cx, Cy):
     # Carla performs negative roll, then negative pitch, then yaw.
     pitch, yaw, roll = to_tensor(pitch), to_tensor(yaw), to_tensor(roll)
     pitch_ = -torch.deg2rad(pitch)
-    R_pitch = torch.zeros([B, 3, 3], device=device)
-    R_pitch[:, 0, 0] = torch.cos(pitch_)
-    R_pitch[:, 0, 2] = torch.sin(pitch_)
-    R_pitch[:, 1, 1] = 1
-    R_pitch[:, 2, 0] = -torch.sin(pitch_)
-    R_pitch[:, 2, 2] = torch.cos(pitch_)
+    R_pitch = torch.zeros([3, 3], device=device)
+    R_pitch[0, 0] = torch.cos(pitch_)
+    R_pitch[0, 2] = torch.sin(pitch_)
+    R_pitch[1, 1] = 1
+    R_pitch[2, 0] = -torch.sin(pitch_)
+    R_pitch[2, 2] = torch.cos(pitch_)
     yaw_ = torch.deg2rad(yaw)
-    R_yaw = torch.zeros([B, 3, 3], device=device)
-    R_yaw[:, 0, 0] = torch.cos(yaw_)
-    R_yaw[:, 0, 1] = -torch.sin(yaw_)
-    R_yaw[:, 1, 0] = torch.sin(yaw_)
-    R_yaw[:, 1, 1] = torch.cos(yaw_)
-    R_yaw[:, 2, 2] = 1
+    R_yaw = torch.zeros([3, 3], device=device)
+    R_yaw[0, 0] = torch.cos(yaw_)
+    R_yaw[0, 1] = -torch.sin(yaw_)
+    R_yaw[1, 0] = torch.sin(yaw_)
+    R_yaw[1, 1] = torch.cos(yaw_)
+    R_yaw[2, 2] = 1
     roll_ = -torch.deg2rad(roll)
-    R_roll = torch.zeros([B, 3, 3], device=device)
-    R_roll[:, 0, 0] = 1
-    R_roll[:, 1, 1] = torch.cos(roll_)
-    R_roll[:, 1, 2] = -torch.sin(roll_)
-    R_roll[:, 2, 1] = torch.sin(roll_)
-    R_roll[:, 2, 2] = torch.cos(roll_)
+    R_roll = torch.zeros([3, 3], device=device)
+    R_roll[0, 0] = 1
+    R_roll[1, 1] = torch.cos(roll_)
+    R_roll[1, 2] = -torch.sin(roll_)
+    R_roll[2, 1] = torch.sin(roll_)
+    R_roll[2, 2] = torch.cos(roll_)
     R_c = R_yaw @ R_pitch @ R_roll
     # The transformation matrix that describes the camera's pose is then [R_c|t_c].
-    Rt_c = torch.zeros([B, 4, 4], device=device)
-    Rt_c[:, :3, :3] = R_c
-    Rt_c[:, :3, 3] = t_c
-    Rt_c[:, 3, 3] = 1
+    Rt_c = torch.zeros([4, 4], device=device)
+    Rt_c[:3, :3] = R_c
+    Rt_c[:3, 3] = t_c
+    Rt_c[3, 3] = 1
     # Then the extrinsic matrix is obtained by inverting the camera's pose matrix:
     # https://ksimek.github.io/2012/08/22/extrinsic/
-    Rt = flip @ torch.inverse(Rt_c)[:, :3]
+    Rt = flip @ torch.inverse(Rt_c)[:3]
     P = K @ Rt
-
     if is_float:
-        P, K, Rt = P[0].numpy(), K[0].numpy(), Rt[0].numpy()
+        P, K, Rt = P.numpy(), K.numpy(), Rt.numpy()
 
     return P, K, Rt
 
@@ -154,7 +151,7 @@ def is_visible(x, y, z, P, im_h=720, im_w=1280):
     proj = (P @ point).flatten()
     # Check if in front of the camera
     if proj[-1] > 0.0:
-        px, py = pflat(proj)[0:2]
+        px, py = proj[:2] / proj[-1]
         if px >= 0 and px <= im_w and py >= 0 and py <= im_h:
             return True
 
@@ -169,11 +166,12 @@ def is_obj_visible(x, y, z, height, P, im_h=720, im_w=1280, min_height=10.0):
     if proj[-1] < 0.0:
         return False
 
-    px, py = pflat(proj)[0:2]
+    px, py = proj[:2] / proj[-1]
     if px >= 0 and px <= im_w and py >= 0 and py <= im_h:
         delta_height = np.array([0, 0, height, 0], dtype=np.float32).reshape((4, 1))
         new_point = point + delta_height
-        proj2 = pflat(P @ new_point)
+        proj2 = P @ new_point
+        proj2 = proj2 / proj2[-1]
         py2 = proj2[1]
 
         pixel_height = abs(py2 - py)

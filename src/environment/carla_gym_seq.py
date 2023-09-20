@@ -12,7 +12,6 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from src.environment.cameras import build_cam
-from src.environment.utils import loc_dist, pflat
 
 # render quality of CARLA
 QUALITY = ("Epic", "Low")
@@ -486,16 +485,18 @@ class CarlaCameraSeqEnv(gym.Env):
         for vert in verts:
             # convert vert to homogeneous coordinate, vert is a carla.Location
             vert_homo = np.array([vert.x, vert.y, vert.z, 1])
-            p_homo = self.camera_intrinsics[cam] @ self.camera_extrinsics[cam] @ vert_homo
-            p = pflat(p_homo)
-            if p[0] > x_max:
-                x_max = p[0]
-            if p[0] < x_min:
-                x_min = p[0]
-            if p[1] > y_max:
-                y_max = p[1]
-            if p[1] < y_min:
-                y_min = p[1]
+            p = self.camera_intrinsics[cam] @ self.camera_extrinsics[cam] @ vert_homo
+            # Check if in front of the camera
+            if p[-1] > 0:
+                p = p[:2] / p[-1]
+                if p[0] > x_max:
+                    x_max = p[0]
+                if p[0] < x_min:
+                    x_min = p[0]
+                if p[1] > y_max:
+                    y_max = p[1]
+                if p[1] < y_min:
+                    y_min = p[1]
 
         if (
                 x_max > 100
