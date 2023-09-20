@@ -20,10 +20,6 @@ class MultiviewX(VisionDataset):
         self.__name__ = 'MultiviewX'
         self.img_shape, self.worldgrid_shape = [1080, 1920], [640, 1000]  # H,W; N_row,N_col
         self.num_cam, self.num_frame = 6, 400
-        # world x,y correspond to w,h
-        self.indexing = 'xy'
-        self.world_indexing_from_xy_mat = np.eye(3)
-        self.world_indexing_from_ij_mat = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])
         # unit in meters
         self.worldcoord_unit = 1
         self.worldcoord_from_worldgrid_mat = np.array([[0.025, 0, 0], [0, 0.025, 0], [0, 0, 1]])

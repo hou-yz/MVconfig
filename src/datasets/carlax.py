@@ -21,13 +21,6 @@ class CarlaX(VisionDataset):
         self.worldgrid_shape = [int((y_max - y_min) * opts["map_expand"]),
                                 int((x_max - x_min) * opts["map_expand"])]  # N_row,N_col
         self.num_cam, self.num_frame = opts["num_cam"], opts["num_frame"]
-        # world x,y correspond to w,h
-        self.indexing = 'xy'
-        self.world_indexing_from_xy_mat = np.eye(3)
-        self.world_indexing_from_ij_mat = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])
-        # image is in xy indexing by default
-        self.img_xy_from_xy_mat = np.eye(3)
-        self.img_xy_from_ij_mat = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])
         # unit in meters
         self.worldcoord_unit = 1
         self.worldcoord_from_worldgrid_mat = np.array([[1 / self.env.opts["map_expand"], 0, x_min],

@@ -91,6 +91,10 @@ class frameDataset(VisionDataset):
         self.Rworld_shape = list(map(lambda x: x // self.world_reduce, self.worldgrid_shape))
         self.Rimg_shape = np.ceil(np.array(self.img_shape) / self.img_reduce).astype(int).tolist()
 
+        # world_grid (projected feature map) <- rule -> world_coord <- K,Rt -> image coord
+        self.Rworldgrid_from_worldcoord = np.linalg.inv(self.base.worldcoord_from_worldgrid_mat @
+                                                        np.diag([self.world_reduce, self.world_reduce, 1]))
+
         # split = ('train', 'val', 'test'), split_ratio=(0.8, 0.1, 0.1)
         split_ratio = tuple(sum(split_ratio[:i + 1]) for i in range(len(split_ratio)))
         # assert split_ratio[-1] == 1
@@ -203,10 +207,7 @@ class frameDataset(VisionDataset):
                     if pedestrian['personID'] not in pid_dict:
                         pid_dict[pedestrian['personID']] = len(pid_dict)
                     num_world_bbox += 1
-                    if self.base.indexing == 'xy':
-                        world_pts.append((grid_x, grid_y))
-                    else:
-                        world_pts.append((grid_y, grid_x))
+                    world_pts.append((grid_x, grid_y))
                     world_pids.append(pid_dict[pedestrian['personID']])
                     for cam in range(self.num_cam):
                         if itemgetter('xmin', 'ymin', 'xmax', 'ymax')(pedestrian['views'][cam]) != (-1, -1, -1, -1):
@@ -244,14 +245,7 @@ class frameDataset(VisionDataset):
 
     def get_world_imgs_trans(self, intrinsic, extrinsic, z=0):
         device = intrinsic.device if isinstance(intrinsic, torch.Tensor) else 'cpu'
-        # image and world feature maps from xy indexing, change them into world (xy/ij) indexing / image (xy) indexing
-        world_zoom_mat = np.diag([1 / self.world_reduce, 1 / self.world_reduce, 1])
-        Rworldgrid_from_worldcoord = to_tensor(world_zoom_mat @
-                                               self.base.world_indexing_from_xy_mat @
-                                               np.linalg.inv(self.base.worldcoord_from_worldgrid_mat),
-                                               dtype=torch.float,
-                                               device=device)
-
+        Rworldgrid_from_worldcoord = to_tensor(self.Rworldgrid_from_worldcoord, dtype=torch.float, device=device)
         # z in meters by default
         # projection matrices: img feat -> world feat
         worldcoord_from_imgcoord = get_worldcoord_from_imgcoord_mat(intrinsic, extrinsic, z / self.base.worldcoord_unit)
@@ -263,17 +257,10 @@ class frameDataset(VisionDataset):
         self.cur_frame = frame = self.frames[index]
         if self.base.__name__ == 'CarlaX':
             observation, info = self.base.env.reset(seed=self.fixed_seeds[index])
-            self.base.intrinsic_matrices, self.base.extrinsic_matrices = \
-                self.base.env.camera_intrinsics, self.base.env.camera_extrinsics
             # get camera matrices
-            self.proj_mats = torch.stack([self.get_world_imgs_trans(self.base.intrinsic_matrices[cam],
-                                                                    self.base.extrinsic_matrices[cam])
+            self.proj_mats = torch.stack([self.get_world_imgs_trans(self.base.env.camera_intrinsics[cam],
+                                                                    self.base.env.camera_extrinsics[cam])
                                           for cam in range(self.num_cam)])
-            # get image & world coverage masks
-            # world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
-            # self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')
-            # img_masks = torch.ones([self.num_cam, 1, self.base.img_shape[0], self.base.img_shape[1]])
-            # self.Rworld_coverage = warp_perspective(img_masks, self.proj_mats, self.Rworld_shape)
 
             imgs = observation["images"]
             configs = observation["camera_configs"]
@@ -309,16 +296,9 @@ class frameDataset(VisionDataset):
         observation, reward, done, info = self.base.env.step(action)
 
         # get camera matrices
-        self.base.intrinsic_matrices, self.base.extrinsic_matrices = \
-            self.base.env.camera_intrinsics, self.base.env.camera_extrinsics
-        self.proj_mats = torch.stack([self.get_world_imgs_trans(self.base.intrinsic_matrices[cam],
-                                                                self.base.extrinsic_matrices[cam])
+        self.proj_mats = torch.stack([self.get_world_imgs_trans(self.base.env.camera_intrinsics[cam],
+                                                                self.base.env.camera_extrinsics[cam])
                                       for cam in range(self.num_cam)])
-        # get image & world coverage masks
-        world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
-        self.imgs_region = warp_perspective(world_masks, torch.inverse(self.proj_mats), self.img_shape, 'nearest')
-        img_masks = torch.ones([self.num_cam, 1, self.base.img_shape[0], self.base.img_shape[1]])
-        self.Rworld_coverage = warp_perspective(img_masks, self.proj_mats, self.Rworld_shape)
 
         imgs = observation["images"]
         configs = observation["camera_configs"]
@@ -436,7 +416,7 @@ if __name__ == '__main__':
     # print(time.time() - t0)
     # pass
     if True:
-        dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train')
+        dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train')
         import matplotlib.pyplot as plt
         from src.utils.projection import get_worldcoord_from_imagecoord
 
@@ -453,12 +433,8 @@ if __name__ == '__main__':
             for i in range(H):
                 for j in range(W):
                     x, y = world_grids[i, j]
-                    if dataset.base.indexing == 'xy':
-                        if x in range(dataset.worldgrid_shape[1]) and y in range(dataset.worldgrid_shape[0]):
-                            world_grid_map[int(y), int(x)] += 1
-                    else:
-                        if x in range(dataset.worldgrid_shape[0]) and y in range(dataset.worldgrid_shape[1]):
-                            world_grid_map[int(x), int(y)] += 1
+                    if x in range(dataset.worldgrid_shape[1]) and y in range(dataset.worldgrid_shape[0]):
+                        world_grid_map[int(y), int(x)] += 1
             world_grid_map = world_grid_map != 0
             plt.imshow(world_grid_map)
             plt.show()

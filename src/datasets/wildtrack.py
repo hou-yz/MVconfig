@@ -15,15 +15,11 @@ class Wildtrack(VisionDataset):
     def __init__(self, root):
         super().__init__(root)
         # image of shape C,H,W (C,N_row,N_col); xy indexging; x,y (w,h) (n_col,n_row)
-        # WILDTRACK has ij-indexing: H*W=480*1440, thus x (i) is \in [0,480), y (j) is \in [0,1440)
-        # WILDTRACK has in-consistent unit: centi-meter (cm) for calibration & pos annotation,
+        # WILDTRACK has xy-indexing: H*W=1440*480, thus x is \in [0,480), y \in [0,1440)
+        # WILDTRACK has in-consistent unit: centi-meter (cm) for calibration & pos annotation
         self.__name__ = 'Wildtrack'
-        self.img_shape, self.worldgrid_shape = [1080, 1920], [480, 1440]  # H,W; N_row,N_col
+        self.img_shape, self.worldgrid_shape = [1080, 1920], [1440, 480]  # H,W; N_row,N_col
         self.num_cam, self.num_frame = 7, 2000
-        # world x,y actually means i,j in Wildtrack, which correspond to h,w
-        self.indexing = 'ij'
-        self.world_indexing_from_xy_mat = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])
-        self.world_indexing_from_ij_mat = np.eye(3)
         # unit in meters
         self.worldcoord_unit = 0.01
         self.worldcoord_from_worldgrid_mat = np.array([[2.5, 0, -300], [0, 2.5, -900], [0, 0, 1]])
