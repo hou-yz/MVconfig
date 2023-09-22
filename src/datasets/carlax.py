@@ -10,7 +10,7 @@ class CarlaX(VisionDataset):
     def __init__(self, opts, root=os.path.expanduser("~/Data/CarlaX"), port=2000, tm_port=8000):
         os.makedirs(root, exist_ok=True)
         super().__init__(root)
-        # image of shape C,H,W (C,N_row,N_col); xy indexging; x,y (w,h) (n_col,n_row)
+        # image of shape C,H,W (C,N_row,N_col); xy indexing; x,y (w,h) (n_col,n_row)
         # CarlaX has xy-indexing
         # CarlaX has consistent unit: meter (m) for calibration & pos annotation
         self.__name__ = 'CarlaX'

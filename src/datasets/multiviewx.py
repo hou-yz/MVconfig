@@ -14,7 +14,7 @@ extrinsic_camera_matrix_filenames = ['extr_Camera1.xml', 'extr_Camera2.xml', 'ex
 class MultiviewX(VisionDataset):
     def __init__(self, root):
         super().__init__(root)
-        # image of shape C,H,W (C,N_row,N_col); xy indexging; x,y (w,h) (n_col,n_row)
+        # image of shape C,H,W (C,N_row,N_col); xy indexing; x,y (w,h) (n_col,n_row)
         # MultiviewX has xy-indexing: H*W=640*1000, thus x is \in [0,1000), y \in [0,640)
         # MultiviewX has consistent unit: meter (m) for calibration & pos annotation
         self.__name__ = 'MultiviewX'
