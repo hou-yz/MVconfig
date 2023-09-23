@@ -8,7 +8,7 @@ from kornia.geometry import warp_perspective
 from src.models.resnet import resnet18
 from src.models.shufflenetv2 import shufflenet_v2_x0_5
 from src.models.mvcontrol import CamControl
-from src.models.multiview_base import MultiviewBase
+from src.models.multiview_base import MultiviewBase, cover_mean, cover_mean_std, aggregate_feat
 from src.utils.image_utils import img_color_denormalize, array2heatmap
 from src.utils.projection import get_worldcoord_from_imgcoord_mat, project_2d_points
 import matplotlib.pyplot as plt
@@ -139,7 +139,7 @@ class MVDet(MultiviewBase):
 
     def get_output(self, world_feat, visualize=False):
         B, N, C, H, W = world_feat.shape
-        world_feat = world_feat.mean(dim=1) if self.aggregation == 'mean' else world_feat.max(dim=1)[0]
+        world_feat = aggregate_feat(world_feat, aggregation=self.aggregation)
 
         # world heads
         world_feat = self.world_feat(world_feat)
@@ -159,6 +159,12 @@ class MVDet(MultiviewBase):
 
         return world_heatmap, world_offset
 
+    def get_world_heatmap(self, feat):
+        B, C, H, W = feat.shape
+        feat = self.world_feat(feat)
+        world_heatmap = self.world_heatmap(feat)
+        return world_heatmap
+
 
 if __name__ == '__main__':
     from src.datasets.frameDataset import frameDataset
@@ -168,6 +174,7 @@ if __name__ == '__main__':
     from torch.utils.data import DataLoader
     from src.utils.decode import ctdet_decode
     from thop import profile
+    import time
 
     dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')))
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
@@ -175,6 +182,12 @@ if __name__ == '__main__':
     model = MVDet(dataset).cuda()
     (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) = next(iter(dataloader))
     model.train()
+    feat, _ = model.get_feat(imgs.cuda(), aug_mats, proj_mats, False)
+    feat_mean, feat_std = cover_mean_std(feat)
+    t0 = time.time()
+    for i in range(100):
+        feat_mean, feat_std = cover_mean_std(feat)
+    print(time.time() - t0)
     (world_heatmap, world_offset), _ = model(imgs.cuda(), aug_mats, proj_mats, True)
     xysc_train = ctdet_decode(world_heatmap, world_offset)
     # macs, params = profile(model, inputs=(imgs[:, :3].cuda(), aug_mats[:, :3].contiguous()))
