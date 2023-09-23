@@ -5,6 +5,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.distributions import Categorical, Normal, Beta
+from src.models.multiview_base import aggregate_feat, cover_mean, cover_mean_std
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -27,7 +28,7 @@ class CamControl(nn.Module):
     def __init__(self, dataset, hidden_dim, arch='transformer', actstd_init=1.0):
         super().__init__()
         self.arch = arch
-        self.feat_branch = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
+        self.feat_branch = nn.Sequential(nn.Conv2d(dataset.num_cam if arch == 'conv' else 1, hidden_dim, 3, 2, 1),
                                          nn.ReLU(), nn.MaxPool2d(2, 2),
                                          nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
                                          nn.ReLU(), nn.MaxPool2d(2, 2),
@@ -49,10 +50,8 @@ class CamControl(nn.Module):
             self.state_token = nn.Parameter(torch.randn(dataset.num_cam, hidden_dim))
 
         self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
-                                    layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
                                     layer_init(nn.Linear(hidden_dim, 1), std=1.0))
         self.actor = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
-                                   layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
                                    layer_init(nn.Linear(hidden_dim, len(dataset.action_names) * 2), std=0.01))
         self.actstd_init = actstd_init
 
@@ -60,24 +59,24 @@ class CamControl(nn.Module):
         return self.critic(state)
 
     def get_action_and_value(self, state, action=None, deterministic=False):
-        feat, configs, step = state
-        B, N, C, H, W = feat.shape
+        heatmaps, configs, step = state
+        B, N, H, W = heatmaps.shape
 
         if self.arch == 'transformer':
             # transformer
-            x_feat = self.feat_branch(feat.flatten(0, 1)).unflatten(0, [B, N])
-            x_config = self.config_branch(configs.flatten(0, 1).to(feat.device)).unflatten(0, [B, N])
+            x_feat = self.feat_branch(heatmaps.flatten(0, 1)[:, None]).unflatten(0, [B, N])
+            x_config = self.config_branch(configs.flatten(0, 1).to(heatmaps.device)).unflatten(0, [B, N])
             x = x_feat + x_config
             token_location = (torch.arange(N).repeat([B, 1]) == step[:, None])
             x[token_location] = self.state_token[step]
-            x += self.positional_embedding.to(feat.device)
+            x += self.positional_embedding.to(heatmaps.device)
             # CHECK: batch_first=True for transformer
             x = self.transformer(x)
             x = x[token_location]
         else:
             # conv + fc only
-            x_feat = self.feat_branch(feat.max(dim=1)[0])
-            x_config = self.config_branch(configs.to(feat.device).flatten(1, 2))
+            x_feat = self.feat_branch(heatmaps)
+            x_config = self.config_branch(configs.to(heatmaps.device).flatten(1, 2))
             x = x_feat + x_config
 
         # output head
@@ -100,7 +99,7 @@ if __name__ == '__main__':
     import tqdm
     from torchvision.models import vit_b_16
     from torchvision.models import vgg16, alexnet
-    from src.utils.tensor_utils import dist_action, dist_l2, dist_angle
+    from src.utils.tensor_utils import dist_action, dist_l2, dist_angle, expectation, tanh_prime
 
 
     class Object(object):
@@ -111,7 +110,7 @@ if __name__ == '__main__':
     dataset = Object()
     dataset.interactive = True
     dataset.config_dim = 7
-    dataset.action_space = ['x', 'y', 'z', 'pitch', 'yaw']
+    dataset.action_names = ['x', 'y', 'z', 'pitch', 'yaw']
     dataset.num_cam = 4
 
     xy1, xy2 = torch.randn([7, 2]), torch.randn([10, 2])
@@ -120,17 +119,13 @@ if __name__ == '__main__':
     yaw2 = torch.tensor([0, 15, 30, 60, 90, 150, 180, -120, -60, -180]) / 180
     dist_rot = dist_angle(yaw1[:, None], yaw2[None])
 
-    dist_action(torch.randn([7, 1, 5]), torch.randn([1, 10, 5]), dataset.action_space)
+    dist_action(torch.randn([7, 1, 5]), torch.randn([1, 10, 5]), dataset.action_names)
 
     model = CamControl(dataset, C, )
     # model.eval()
 
-    state = (torch.randn([B, N, C, H, W]), torch.randn([B, N, dataset.config_dim]), torch.randint(0, N, [B]))
-    # t0 = time.time()
-    # for _ in tqdm.tqdm(range(10)):
-    #     # with torch.no_grad():
-    #     model.get_action_and_value(state)
-    # print(time.time() - t0)
+    state = (torch.randn([B, N, H, W]), torch.randn([B, N, dataset.config_dim]), torch.randint(0, N, [B]))
+    model.get_action_and_value(state)
 
     mu, sigma = torch.zeros([B, dataset.config_dim]), \
         torch.linspace(0.1, 10, B)[:, None].repeat([1, dataset.config_dim])
