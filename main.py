@@ -92,7 +92,7 @@ def main(args):
     # logging
     RL_settings = f'RL_{args.carla_cfg}_{args.reward}_{"C" if args.control_arch == "conv" else "E"}_' \
                   f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
-                  f'stdinit{args.actstd_init}tanh_ent{args.ent_coef}_div{args.div_coef}_coverONLY_' \
+                  f'stdinit{args.actstd_init}tanh_ent{args.ent_coef}_div{args.div_coef}_cover{args.cover_coef}_' \
                   f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{RL_settings}' \
              f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
@@ -122,14 +122,17 @@ def main(args):
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'control' not in k}
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
-        # tensorboard logging
-        writer = SummaryWriter(logdir)
-        writer.add_text("hyperparameters",
-                        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
-                                                                 for key, value in vars(args).items()])))
+        if not is_debug:
+            # tensorboard logging
+            writer = SummaryWriter(logdir)
+            writer.add_text("hyperparameters",
+                            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
+                                                                     for key, value in vars(args).items()])))
+        else:
+            writer = None
     else:
         if not args.eval:
-            with open(f'logs/{args.dataset}/{args.arch}_.txt', 'w') as fp:
+            with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}.txt', 'w') as fp:
                 fp.write(logdir)
 
         writer = None
@@ -260,14 +263,23 @@ if __name__ == '__main__':
                         help="coefficient of the entropy")
     parser.add_argument("--vf_coef", type=float, default=0.5,
                         help="coefficient of the value function")
-    parser.add_argument("--div_coef", type=float, default=0.3,
-                        help="coefficient of the action diversity")
-    parser.add_argument("--div_clamp", type=float, default=2.0,
-                        help="coefficient of the action diversity")
     parser.add_argument("--max_grad_norm", type=float, default=0.5,
                         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target_kl", type=float, default=None,
                         help="the target KL divergence threshold")
+    # additional loss/regularization
+    parser.add_argument("--div_coef", type=float, default=0.3,
+                        help="coefficient of the action diversity")
+    parser.add_argument("--div_clamp", type=float, default=2.0,
+                        help="clamp range of the action diversity")
+    parser.add_argument("--div_xy_coef", type=float, default=0.0)
+    parser.add_argument("--div_yaw_coef", type=float, default=1.0)
+    parser.add_argument("--cover_coef", type=float, default=0.0,
+                        help="coefficient of the coverage")
+    parser.add_argument("--cover_min_clamp", type=float, default=10,
+                        help="clamp range of the coverage")
+    parser.add_argument("--cover_max_clamp", type=float, default=200,
+                        help="clamp range of the coverage")
     # multiview detection specific settings
     parser.add_argument('--reID', action='store_true')
     parser.add_argument('--augmentation', type=str2bool, default=True)
