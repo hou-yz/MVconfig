@@ -38,9 +38,9 @@ def cover_loss(proj_mats, cover_map, history_cover_maps, b_world_gts, dataset, c
         for border in [proj_top, proj_left, proj_bottom, proj_right, proj_center]]
     # visibility and weight for pedestrian in each view
     is_visible = _transpose_and_gather_feat(cover_map.detach().bool(), pedestrian_idx)[..., 0]
-    # map_weights = torch.tanh(1 + history_cover_maps.sum(dim=1, keepdims=True)) - \
-    #               torch.tanh(history_cover_maps.sum(dim=1, keepdims=True))
-    map_weights = ~history_cover_maps.sum(dim=1, keepdims=True).bool()
+    map_weights = torch.tanh(1 + history_cover_maps.sum(dim=1, keepdims=True)) - \
+                  torch.tanh(history_cover_maps.sum(dim=1, keepdims=True))
+    # map_weights = ~history_cover_maps.sum(dim=1, keepdims=True).bool()
     pedestrian_weights = _transpose_and_gather_feat(map_weights, pedestrian_idx)[..., 0]
     # loss: pull the <nearest> border closer to invisible pedestrian
     loss_ = torch.stack([dist_top, dist_left, dist_bottom, dist_right]).min(dim=0)[0] * ~is_visible

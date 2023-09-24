@@ -11,13 +11,13 @@ def project_2d_points(project_mat, input_points, check_visible=False):
     N, C = input_points.shape
     input_points = torch.cat([input_points, torch.ones([N, 1], device=device)], dim=1)
     output_points_ = project_mat @ input_points.T
-    output_points = (output_points_[:2, :] / output_points_[2, :]).T
     if check_visible:
         is_visible = output_points_[2, :] > 0
-        output_points[~is_visible] = 1e6
-        return output_points, is_visible
+        output_points = (output_points_[:2, :] / (output_points_[2, :].abs() + 1e-6)) * is_visible + \
+                        torch.ones([2, N], device=device) * 1e6 * ~is_visible
+        return output_points.T, is_visible
     else:
-        return output_points
+        return (output_points_[:2, :] / output_points_[2, :]).T
 
 
 def get_worldcoord_from_imagecoord(image_coord, intrinsic_mat, extrinsic_mat, z=0):

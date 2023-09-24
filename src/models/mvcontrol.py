@@ -41,6 +41,7 @@ class CamControl(nn.Module):
         if arch == 'transformer':
             # transformer
             self.positional_embedding = create_pos_embedding(dataset.num_cam, hidden_dim)
+            # self.positional_embedding = nn.Parameter(torch.randn(dataset.num_cam + 1, hidden_dim))
             # CHECK: batch_first=True for transformer
             # NOTE: by default nn.Transformer() has enable_nested_tensor=True in its nn.TransformerEncoder(),
             # which can cause `src` to change from [B, 4, C] into [B, 1<=n<=3, C] when given `src_key_padding_mask`,
@@ -64,12 +65,19 @@ class CamControl(nn.Module):
 
         if self.arch == 'transformer':
             # transformer
+            # x_feat = self.feat_branch(heatmaps)
+            # x_config = self.config_branch(configs.flatten(0, 1).to(heatmaps.device)).unflatten(0, [B, N])
+            # _, C = x_feat.shape
+            # x = torch.cat([x_config, x_feat[:, None]], dim=1)
+            # x = F.layer_norm(x, [C]) + self.positional_embedding
+            # token_location = (torch.arange(N + 1).repeat([B, 1]) == step[:, None])
+            # x[token_location] = F.layer_norm(self.state_token[step], [C])
             x_feat = self.feat_branch(heatmaps.flatten(0, 1)[:, None]).unflatten(0, [B, N])
             x_config = self.config_branch(configs.flatten(0, 1).to(heatmaps.device)).unflatten(0, [B, N])
             x = x_feat + x_config
             token_location = (torch.arange(N).repeat([B, 1]) == step[:, None])
             x[token_location] = self.state_token[step]
-            x += self.positional_embedding.to(heatmaps.device)
+            x = F.layer_norm(x, [x.shape[-1]]) + self.positional_embedding.to(heatmaps.device)
             # CHECK: batch_first=True for transformer
             x = self.transformer(x)
             x = x[token_location]
@@ -127,15 +135,15 @@ if __name__ == '__main__':
     state = (torch.randn([B, N, H, W]), torch.randn([B, N, dataset.config_dim]), torch.randint(0, N, [B]))
     model.get_action_and_value(state)
 
-    mu, sigma = torch.zeros([B, dataset.config_dim]), \
-        torch.linspace(0.1, 10, B)[:, None].repeat([1, dataset.config_dim])
-    probs = Normal(mu, sigma)
-    z1 = expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale],
-                     lambda x: -torch.stack([probs.log_prob(x[:, :, i]) for i in range(x.shape[-1])], dim=2))
-    t0 = time.time()
-    for _ in tqdm.tqdm(range(100)):
-        z2 = expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale], tanh_prime)
-    print(time.time() - t0)
+    # mu, sigma = torch.zeros([B, dataset.config_dim]), \
+    #     torch.linspace(0.1, 10, B)[:, None].repeat([1, dataset.config_dim])
+    # probs = Normal(mu, sigma)
+    # z1 = expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale],
+    #                  lambda x: -torch.stack([probs.log_prob(x[:, :, i]) for i in range(x.shape[-1])], dim=2))
+    # t0 = time.time()
+    # for _ in tqdm.tqdm(range(100)):
+    #     z2 = expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale], tanh_prime)
+    # print(time.time() - t0)
 
     # tgt = torch.randn([B, 1, C])
     # memory = torch.randn([B, N, C])

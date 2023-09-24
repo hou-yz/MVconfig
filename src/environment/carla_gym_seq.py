@@ -137,7 +137,9 @@ class CarlaCameraSeqEnv(gym.Env):
         # print(self.map_width)
 
         self.num_cam = self.opts["num_cam"]
-        # have seen how many cameras
+        # have seen how many cameras: step = {0,...,num_cam}
+        # step = {0,...,num_cam-1}: input state to policy network
+        # step = num_cam: done = True
         self.step_counter = 0
 
         self.config_dim = 7
@@ -185,7 +187,7 @@ class CarlaCameraSeqEnv(gym.Env):
             _action[action_dim_dict[action_name]] = act[i]
         _action = torch.clamp(_action, -1, 1)
         _cfg = decode_camera_cfg(_action, self.opts)
-        _location, _rotation, _fov = _cfg[:3], _cfg[3:6], _cfg[6]
+        _location, _rotation, _fov = _cfg[:3], _cfg[3:6], _cfg[[6]]
         # default settings for limited action space
         location, rotation, fov = torch.tensor(self.opts["cam_pos_lst"], device=device)[cam], \
             torch.tensor(self.opts["cam_dir_lst"], device=device)[cam], \

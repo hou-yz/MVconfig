@@ -93,7 +93,7 @@ def main(args):
     RL_settings = f'RL_{args.carla_cfg}_{args.reward}_{"C" if args.control_arch == "conv" else "E"}_' \
                   f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
                   f'stdinit{args.actstd_init}tanh_ent{args.ent_coef}_div{args.div_coef}_cover{args.cover_coef}_' \
-                  f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
+                  f'mu{args.mu_div_coef}_{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{RL_settings}' \
              f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
         else f'logs/{args.dataset}/EVAL_{args.resume}'
@@ -162,7 +162,8 @@ def main(args):
         if epoch < warmup_epochs:
             return epoch / warmup_epochs
         else:
-            return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
+            # return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
+            return 1 - (epoch - warmup_epochs) / (args.epochs - warmup_epochs)
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler) if not args.interactive \
         else torch.optim.lr_scheduler.StepLR(optimizer, step_size=20)
@@ -183,8 +184,6 @@ def main(args):
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
             train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler)
-            if isinstance(scheduler, torch.optim.lr_scheduler.StepLR):
-                scheduler.step()
             print('Testing...')
             test_loss, test_prec = trainer.test(test_loader)
 
@@ -268,12 +267,14 @@ if __name__ == '__main__':
     parser.add_argument("--target_kl", type=float, default=None,
                         help="the target KL divergence threshold")
     # additional loss/regularization
-    parser.add_argument("--div_coef", type=float, default=0.3,
-                        help="coefficient of the action diversity")
+    parser.add_argument("--div_coef", type=float, default=1.0,
+                        help="coefficient of chosen action diversity")
     parser.add_argument("--div_clamp", type=float, default=2.0,
-                        help="clamp range of the action diversity")
+                        help="clamp range of chosen action diversity")
     parser.add_argument("--div_xy_coef", type=float, default=0.0)
     parser.add_argument("--div_yaw_coef", type=float, default=1.0)
+    parser.add_argument("--mu_div_coef", type=float, default=0.0,
+                        help="coefficient of mean action diversity")
     parser.add_argument("--cover_coef", type=float, default=0.0,
                         help="coefficient of the coverage")
     parser.add_argument("--cover_min_clamp", type=float, default=10,

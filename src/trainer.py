@@ -87,14 +87,14 @@ class PerspectiveTrainer(object):
             imgs.append(img)
             action_history.append(action.cpu())
             step, configs = torch.tensor(step)[None], torch.tensor(configs, dtype=torch.float32)[None, :]
-            with torch.no_grad():
-                feat, _ = self.model.get_feat(img[None, :].cuda(), aug_mat[None, :], proj_mat[None, :])
-                cam_heatmap = self.model.get_world_heatmap(feat.flatten(0, 1))[:, 0].unflatten(0, [B, -1])
-            cover_map = feat.norm(dim=2) != 0
             visible_mask = project_2d_points(torch.inverse(proj_mat[0]).cuda(),
                                              self.unit_world_grids.cuda(),
                                              check_visible=True)[1].view([1, H, W])
-            cover_map &= visible_mask
+            with torch.no_grad():
+                feat, _ = self.model.get_feat(img[None, :].cuda(), aug_mat[None, :], proj_mat[None, :])
+                feat *= visible_mask
+                cam_heatmap = self.model.get_world_heatmap(feat.flatten(0, 1))[:, 0].unflatten(0, [B, -1])
+            cover_map = feat.norm(dim=2) != 0
             cam_heatmap = torch.sigmoid(cam_heatmap) * cover_map + HEATMAP_PAD_VALUE * ~cover_map
             cam = step - 1
             obs_heatmaps[:, cam] = cam_heatmap
@@ -182,6 +182,7 @@ class PerspectiveTrainer(object):
                                          for cam in range(dataset.num_cam + 1)])
         weighted_cover_map = torch.stack([torch.tanh(cover_map[:cam + 1].sum(0)) - torch.tanh(cover_map[:cam].sum(0))
                                           for cam in range(1, dataset.num_cam + 1)])
+        # weighted_cover_map = cover_map[1:]
         weighted_cover_map *= world_gt['heatmap']
         # compute loss & moda based on final result
         task_losses = torch.zeros([dataset.num_cam + 1])
@@ -218,7 +219,7 @@ class PerspectiveTrainer(object):
         if 'avgcover' in self.args.reward:  # dense
             rewards += cover_map.mean(dim=[1, 2])[1:] * 0.1  # dense
         if 'weightcover' in self.args.reward:
-            rewards += weighted_cover_map.mean(dim=[1, 2]) * 0.1
+            rewards += weighted_cover_map.sum(dim=[1, 2]) / world_gt['heatmap'].sum()
         if 'loss' in self.args.reward:
             rewards += (-task_losses[1:] + task_losses[:-1])  # dense
         if 'moda' in self.args.reward:
@@ -346,6 +347,13 @@ class PerspectiveTrainer(object):
                     if step > 0:
                         min_dist[b] += torch.min(action_dist[b, :step])
                 div_loss = torch.clamp(min_dist, 0, self.args.div_clamp).mean()
+                # action diversity in terms of \mu
+                mu_div = torch.zeros([dataset.num_cam]).cuda()
+                for cam in range(dataset.num_cam):
+                    idx = b_step[mb_inds] == cam
+                    if idx.sum().item() > 1:
+                        mu_div[cam] = probs.loc[idx].std(dim=0).mean()
+                mu_div_loss = mu_div.mean()
                 # worldgrid(xy)_from_img(xy)
                 mu_proj_mats = torch.stack([action2proj_mat(dataset, self.action_mapping(probs.loc[b]),
                                                             b_step[mb_inds][b].item())
@@ -365,11 +373,13 @@ class PerspectiveTrainer(object):
                 mb_world_gts = {key: b_world_gts[key][b_world_gt_idx[mb_inds]] for key in b_world_gts.keys()}
                 proj_loss = -((torch.tanh(mu_cover_map + history_cover_maps.sum(dim=1, keepdims=True)) -
                                torch.tanh(history_cover_maps.sum(dim=1, keepdims=True))) *
-                              b_world_gts['heatmap'][b_world_gt_idx[mb_inds]].cuda()).mean()
-                proj_loss = cover_loss(mu_proj_mats, mu_cover_map, history_cover_maps, mb_world_gts, dataset,
-                                       [self.args.cover_min_clamp, self.args.cover_max_clamp])
+                              mb_world_gts['heatmap'].cuda())
+                proj_loss = (proj_loss.sum(dim=[2, 3]) / mb_world_gts['heatmap'].cuda().sum(dim=[2, 3])).mean()
+                # proj_loss = cover_loss(mu_proj_mats, mu_cover_map, history_cover_maps, mb_world_gts, dataset,
+                #                        [self.args.cover_min_clamp, self.args.cover_max_clamp])
                 loss = pg_loss - self.args.ent_coef * entropy_loss + v_loss * self.args.vf_coef - \
-                       div_loss * self.args.div_coef + proj_loss * self.args.cover_coef
+                       div_loss * self.args.div_coef + proj_loss * self.args.cover_coef - \
+                       mu_div_loss * self.args.mu_div_coef
                 # loss = proj_loss * self.args.cover_coef
 
                 optimizer.zero_grad()
@@ -398,12 +408,13 @@ class PerspectiveTrainer(object):
             self.writer.add_scalar("losses/action_dist", min_dist.mean().item(), self.rl_global_step)
             self.writer.add_scalar("losses/div_loss", div_loss.item(), self.rl_global_step)
             self.writer.add_scalar("losses/cover_loss", proj_loss.item(), self.rl_global_step)
+            self.writer.add_scalar("losses/mu_loss", mu_div_loss.item(), self.rl_global_step)
 
         with np.printoptions(formatter={'float': '{: 0.3f}'.format}):
             # action_space = dataset.base.env.opts['env_action_space'].split('-')
             print(f'v loss: {v_loss.item():.3f}, p loss: {pg_loss.item():.3f}, ent: {entropy_loss.item():.3f}, '
                   f'div loss: {div_loss.item():.3f}, cover loss: {proj_loss.item():.3f}, '
-                  f'avg return: {b_returns.mean().item():.3f}')
+                  f'mu loss: {mu_div_loss.item():.3f}, avg return: {b_returns.mean().item():.3f}')
             if torch.where(b_step[mb_inds] == 0)[0].numel():
                 idx = torch.where(b_step[mb_inds] == 0)[0][0].item()
                 mu = probs.loc.detach().cpu().numpy()
@@ -468,6 +479,8 @@ class PerspectiveTrainer(object):
                 t_epoch = t1 - t0
                 print(f'Train epoch: {epoch}, batch:{(batch_idx + 1)}, '
                       f'loss: {losses / (batch_idx + 1):.3f}, time: {t_epoch:.1f}')
+        if isinstance(scheduler, torch.optim.lr_scheduler.StepLR):
+            scheduler.step()
         return losses / len(dataloader), None
 
     def test(self, dataloader):
