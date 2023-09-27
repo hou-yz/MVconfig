@@ -166,7 +166,7 @@ def main(args):
             return 1 - (epoch - warmup_epochs) / (args.epochs - warmup_epochs)
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler) if not args.interactive \
-        else torch.optim.lr_scheduler.StepLR(optimizer, step_size=20)
+        else None  # torch.optim.lr_scheduler.StepLR(optimizer, step_size=20)
 
     trainer = PerspectiveTrainer(model, logdir, writer, args)
 

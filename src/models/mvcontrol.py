@@ -28,19 +28,21 @@ class CamControl(nn.Module):
     def __init__(self, dataset, hidden_dim, arch='transformer', actstd_init=1.0):
         super().__init__()
         self.arch = arch
-        self.feat_branch = nn.Sequential(nn.Conv2d(dataset.num_cam if arch == 'conv' else 1, hidden_dim, 3, 2, 1),
-                                         nn.ReLU(), nn.MaxPool2d(2, 2),
-                                         nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
-                                         nn.ReLU(), nn.MaxPool2d(2, 2),
-                                         nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1),
-                                         nn.AdaptiveAvgPool2d((1, 1)), nn.Flatten())
+        self.RRworld_shape = tuple(map(lambda x: x // 32, dataset.Rworld_shape))
+        self.feat_branch = nn.Sequential(nn.Conv2d(1, hidden_dim, 3, 2, 1), nn.ReLU(),
+                                         nn.Conv2d(hidden_dim, hidden_dim // 8, 3, 2, 1), nn.ReLU(),
+                                         nn.AdaptiveMaxPool2d(self.RRworld_shape), nn.Flatten(),
+                                         nn.Linear(hidden_dim // 8 * math.prod(self.RRworld_shape), hidden_dim * 4),
+                                         nn.ReLU(),
+                                         nn.Linear(hidden_dim * 4, hidden_dim * 4), nn.ReLU(),
+                                         nn.Linear(hidden_dim * 4, hidden_dim))
         self.config_branch = nn.Sequential(nn.Linear(dataset.config_dim * (dataset.num_cam if arch == 'conv'
                                                                            else 1), hidden_dim), nn.ReLU(),
                                            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
                                            nn.Linear(hidden_dim, hidden_dim))
         if arch == 'transformer':
             # transformer
-            self.positional_embedding = create_pos_embedding(dataset.num_cam, hidden_dim)
+            self.positional_embedding = create_pos_embedding(dataset.num_cam + 1, hidden_dim)
             # self.positional_embedding = nn.Parameter(torch.randn(dataset.num_cam + 1, hidden_dim))
             # CHECK: batch_first=True for transformer
             # NOTE: by default nn.Transformer() has enable_nested_tensor=True in its nn.TransformerEncoder(),
@@ -65,17 +67,14 @@ class CamControl(nn.Module):
 
         if self.arch == 'transformer':
             # transformer
-            # x_feat = self.feat_branch(heatmaps)
-            # x_config = self.config_branch(configs.flatten(0, 1).to(heatmaps.device)).unflatten(0, [B, N])
-            # _, C = x_feat.shape
-            # x = torch.cat([x_config, x_feat[:, None]], dim=1)
-            # x = F.layer_norm(x, [C]) + self.positional_embedding
-            # token_location = (torch.arange(N + 1).repeat([B, 1]) == step[:, None])
-            # x[token_location] = F.layer_norm(self.state_token[step], [C])
-            x_feat = self.feat_branch(heatmaps.flatten(0, 1)[:, None]).unflatten(0, [B, N])
+            x_feat = self.feat_branch(heatmaps.max(dim=1, keepdim=True)[0])
             x_config = self.config_branch(configs.flatten(0, 1).to(heatmaps.device)).unflatten(0, [B, N])
-            x = x_feat + x_config
-            token_location = (torch.arange(N).repeat([B, 1]) == step[:, None])
+            x = torch.cat([x_config, x_feat[:, None]], dim=1)
+            token_location = (torch.arange(N + 1).repeat([B, 1]) == step[:, None])
+            # x_feat = self.feat_branch(heatmaps.flatten(0, 1)[:, None]).unflatten(0, [B, N])
+            # x_config = self.config_branch(configs.flatten(0, 1).to(heatmaps.device)).unflatten(0, [B, N])
+            # x = x_feat + x_config
+            # token_location = (torch.arange(N).repeat([B, 1]) == step[:, None])
             x[token_location] = self.state_token[step]
             x = F.layer_norm(x, [x.shape[-1]]) + self.positional_embedding.to(heatmaps.device)
             # CHECK: batch_first=True for transformer
@@ -117,6 +116,7 @@ if __name__ == '__main__':
     B, N, C, H, W = 32, 4, 128, 200, 200
     dataset = Object()
     dataset.interactive = True
+    dataset.Rworld_shape = [H, W]
     dataset.config_dim = 7
     dataset.action_names = ['x', 'y', 'z', 'pitch', 'yaw']
     dataset.num_cam = 4

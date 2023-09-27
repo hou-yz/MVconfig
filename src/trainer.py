@@ -39,7 +39,7 @@ class PerspectiveTrainer(object):
         self.memory_bank = {'obs': [],
                             'actions': [],
                             'logprobs': [],
-                            # 'rewards': [],
+                            'rewards': [],
                             'dones': [],
                             'values': [],
                             'returns': [],
@@ -61,14 +61,16 @@ class PerspectiveTrainer(object):
         assert B == 1, 'currently only support batch size of 1 for the envs'
         next_done = False
         obs_heatmaps = torch.ones([B, dataset.num_cam, *dataset.Rworld_shape]).cuda() * HEATMAP_PAD_VALUE
+        obs_covermaps = torch.zeros([B, dataset.num_cam, *dataset.Rworld_shape], dtype=torch.bool).cuda()
         model_feat = torch.zeros([B, dataset.num_cam, self.model.base_dim, *dataset.Rworld_shape]).cuda()
         imgs = []
         action_history = []
         # step 0: initialization
         cam_heatmap = torch.ones([B, 1, *dataset.Rworld_shape]).cuda() * HEATMAP_PAD_VALUE
+        cam_covermap = torch.zeros([B, 1, *dataset.Rworld_shape], dtype=torch.bool).cuda()
         _, N, C, H, W = model_feat.shape
         while not next_done:
-            # step 1 ~ N: action
+            # step 0 ~ N-1: action
             with torch.no_grad():
                 action, value, probs = self.agent.get_action_and_value(
                     (obs_heatmaps, configs, step), deterministic=self.args.rl_deterministic and not training)
@@ -76,7 +78,10 @@ class PerspectiveTrainer(object):
                 self.rl_global_step += 1 * B
                 # Markovian if have (obs_heatmaps, configs, step) as state
                 # only store cam_heatmap (one cam) instead of obs_heatmaps (all cams) to save memory
-                self.memory_bank['obs'].append((cam_heatmap.cpu() if step.item() != 0 else None, configs, step))
+                self.memory_bank['obs'].append((cam_heatmap.cpu() if step.item() != 0 else None,
+                                                cam_covermap.cpu() if step.item() != 0 else None,
+                                                configs,
+                                                step))
                 self.memory_bank['dones'].append(next_done)
                 self.memory_bank['actions'].append(action.cpu())
                 self.memory_bank['values'].append(value.item())
@@ -94,22 +99,23 @@ class PerspectiveTrainer(object):
                 feat, _ = self.model.get_feat(img[None, :].cuda(), aug_mat[None, :], proj_mat[None, :])
                 feat *= visible_mask
                 cam_heatmap = self.model.get_world_heatmap(feat.flatten(0, 1))[:, 0].unflatten(0, [B, -1])
-            cover_map = feat.norm(dim=2) != 0
-            cam_heatmap = torch.sigmoid(cam_heatmap) * cover_map + HEATMAP_PAD_VALUE * ~cover_map
+            cam_covermap = feat.norm(dim=2) != 0
+            cam_heatmap = torch.sigmoid(cam_heatmap) * cam_covermap + HEATMAP_PAD_VALUE * ~cam_covermap
             cam = step - 1
             obs_heatmaps[:, cam] = cam_heatmap
-            model_feat[:, cam] = feat * visible_mask
+            obs_covermaps[:, cam] = cam_covermap
+            model_feat[:, cam] = feat
 
         # visualize
         def cover_visualize():
-            cover_map = model_feat[0].norm(dim=1).bool().float().mean([0]).cpu()
+            obs_covermaps = model_feat[0].norm(dim=1).bool().float().mean([0]).cpu()
             pedestrian_gt_ij = torch.where(world_gt['heatmap'][0] == 1)
             H, W = world_gt['heatmap'].shape[-2:]
             pedestrian_gt_ij = (world_gt['idx'][world_gt['reg_mask']] // W, world_gt['idx'][world_gt['reg_mask']] % W)
             fig = plt.figure(figsize=tuple(np.array(dataset.Rworld_shape)[::-1] / 50))
             ax = fig.add_axes([0, 0, 1, 1])
             ax.axis('off')
-            ax.imshow(cover_map + torch.sigmoid(world_heatmap)[0, 0].detach().cpu(), vmin=0, vmax=2)
+            ax.imshow(obs_covermaps + torch.sigmoid(world_heatmap)[0, 0].detach().cpu(), vmin=0, vmax=2)
             ax.scatter(pedestrian_gt_ij[1], pedestrian_gt_ij[0], 4, 'orange', alpha=0.7)
             # https://stackoverflow.com/a/7821917/8305276
             # If we haven't already shown or saved the plot, then we need to
@@ -124,6 +130,7 @@ class PerspectiveTrainer(object):
             plt.clf()
             return data
 
+        # step N (step range is 0 ~ N-1 so this is after done=True): calculate rewards
         if not training:
             world_heatmap, world_offset = self.model.get_output(model_feat)
             if visualize:
@@ -154,7 +161,7 @@ class PerspectiveTrainer(object):
                 returns[t] = rewards[t] + self.args.gamma * nextnonterminal * next_return
                 advantages[t] = returns[t] - values[t]
         for t in range(dataset.num_cam):
-            # self.memory_bank['rewards'].append(float(rewards[t]))
+            self.memory_bank['rewards'].append(float(rewards[t]))
             self.memory_bank['advantages'].append(float(advantages[t]))
             self.memory_bank['returns'].append(float(returns[t]))
         self.memory_bank['world_gt'].append(world_gt)
@@ -177,12 +184,13 @@ class PerspectiveTrainer(object):
     def rl_rewards(self, dataset, action_history, model_feat, world_gt, frame):
         # coverage
         # N + 1, H,W
-        cover_map = torch.cat([torch.zeros([1, *dataset.Rworld_shape]), model_feat.norm(dim=1).bool().float()])
-        overall_coverages = torch.stack([cover_map[:cam + 1].max(dim=0)[0].mean()
+        obs_covermaps = torch.cat([torch.zeros([1, *dataset.Rworld_shape]), model_feat.norm(dim=1).bool().float()])
+        overall_coverages = torch.stack([obs_covermaps[:cam + 1].max(dim=0)[0].mean()
                                          for cam in range(dataset.num_cam + 1)])
-        weighted_cover_map = torch.stack([torch.tanh(cover_map[:cam + 1].sum(0)) - torch.tanh(cover_map[:cam].sum(0))
-                                          for cam in range(1, dataset.num_cam + 1)])
-        # weighted_cover_map = cover_map[1:]
+        weighted_cover_map = torch.stack(
+            [torch.tanh(obs_covermaps[:cam + 1].sum(0)) - torch.tanh(obs_covermaps[:cam].sum(0))
+             for cam in range(1, dataset.num_cam + 1)])
+        # weighted_cover_map = obs_covermaps[1:]
         weighted_cover_map *= world_gt['heatmap']
         # compute loss & moda based on final result
         task_losses = torch.zeros([dataset.num_cam + 1])
@@ -217,7 +225,7 @@ class PerspectiveTrainer(object):
             # rewards += (overall_coverages[1:] - overall_coverages[:-1]) * 0.1
             rewards[-1] += overall_coverages[-1] * 0.1  # final step
         if 'avgcover' in self.args.reward:  # dense
-            rewards += cover_map.mean(dim=[1, 2])[1:] * 0.1  # dense
+            rewards += obs_covermaps.mean(dim=[1, 2])[1:] * 0.1  # dense
         if 'weightcover' in self.args.reward:
             rewards += weighted_cover_map.sum(dim=[1, 2]) / world_gt['heatmap'].sum()
         if 'loss' in self.args.reward:
@@ -233,13 +241,15 @@ class PerspectiveTrainer(object):
 
     def train_rl(self, dataset, optimizer):
         # flatten the batch
-        b_cam_heatmap, b_configs, b_step = [], [], []
-        for (cam_heatmap, configs, step) in self.memory_bank['obs']:
+        b_cam_heatmap, b_cam_covermap, b_configs, b_step = [], [], [], []
+        for (cam_heatmap, cam_covermap, configs, step) in self.memory_bank['obs']:
             if cam_heatmap is not None:
                 b_cam_heatmap.append(cam_heatmap)  # ppo_steps / dataset.num_cam * (dataset.num_cam - 1)
+                b_cam_covermap.append(cam_covermap)  # ppo_steps / dataset.num_cam * (dataset.num_cam - 1)
             b_configs.append(configs)  # ppo_steps
             b_step.append(step)  # ppo_steps
         b_cam_heatmap, b_configs, b_step = torch.cat(b_cam_heatmap)[:, 0], torch.cat(b_configs), torch.cat(b_step)
+        b_cam_covermap = torch.cat(b_cam_covermap)[:, 0]
         b_actions = torch.cat(self.memory_bank['actions'])
         b_logprobs = torch.tensor(self.memory_bank['logprobs'])
         b_advantages = torch.tensor(self.memory_bank['advantages'])
@@ -253,7 +263,7 @@ class PerspectiveTrainer(object):
         self.memory_bank = {'obs': [],
                             'actions': [],
                             'logprobs': [],
-                            # 'rewards': [],
+                            'rewards': [],
                             'dones': [],
                             'values': [],
                             'returns': [],
@@ -267,6 +277,7 @@ class PerspectiveTrainer(object):
         B = self.args.rl_minibatch_size
         # append a heatmap padding term
         b_cam_heatmap = torch.cat([b_cam_heatmap, torch.ones([1, H, W]) * HEATMAP_PAD_VALUE])
+        b_cam_covermap = torch.cat([b_cam_covermap, torch.zeros([1, H, W], dtype=torch.bool)])
         # idx for cam_heatmap
         idx_lookup = torch.stack([(b_step > 0)[:l + 1].sum() for l in range(L)]) - 1
         # where to find cam_heatmap indices in obs_heatmaps
@@ -349,19 +360,15 @@ class PerspectiveTrainer(object):
                 div_loss = torch.clamp(min_dist, 0, self.args.div_clamp).mean()
                 # action diversity in terms of \mu
                 mu_div = torch.zeros([dataset.num_cam]).cuda()
-                for cam in range(dataset.num_cam):
-                    idx = b_step[mb_inds] == cam
+                for step in range(1, dataset.num_cam):  # skip the initial step as that one should be the same guess
+                    idx = b_step[mb_inds] == step
                     if idx.sum().item() > 1:
-                        mu_div[cam] = probs.loc[idx].std(dim=0).mean()
+                        mu_div[step] = probs.loc[idx].std(dim=0).mean()
                 mu_div_loss = mu_div.mean()
                 # worldgrid(xy)_from_img(xy)
                 mu_proj_mats = torch.stack([action2proj_mat(dataset, self.action_mapping(probs.loc[b]),
                                                             b_step[mb_inds][b].item())
                                             for b in range(B)])
-                # history_proj_mats = torch.stack([torch.stack(
-                #     [action2proj_mat(dataset, self.action_mapping(mb_action_history[b][n]), b_step[mb_inds][b].item())
-                #      for n in range(dataset.num_cam)])
-                #     for b in range(B)])
                 mu_cover_map = warp_perspective(torch.ones([B, 1, *dataset.img_shape]).cuda(),
                                                 mu_proj_mats, dataset.Rworld_shape)
                 visible_masks = torch.stack([project_2d_points(torch.inverse(mu_proj_mats[b]),
@@ -369,7 +376,8 @@ class PerspectiveTrainer(object):
                                                                check_visible=True)[1].view([1, H, W])
                                              for b in range(B)])
                 mu_cover_map *= visible_masks
-                history_cover_maps = (b_cam_heatmap[b_heatmap_inds[mb_inds]] != HEATMAP_PAD_VALUE).cuda()
+                # history_cover_maps = (b_cam_heatmap[b_heatmap_inds[mb_inds]] != HEATMAP_PAD_VALUE).cuda()
+                history_cover_maps = b_cam_covermap[b_heatmap_inds[mb_inds]].cuda()
                 mb_world_gts = {key: b_world_gts[key][b_world_gt_idx[mb_inds]] for key in b_world_gts.keys()}
                 proj_loss = -((torch.tanh(mu_cover_map + history_cover_maps.sum(dim=1, keepdims=True)) -
                                torch.tanh(history_cover_maps.sum(dim=1, keepdims=True))) *
@@ -380,7 +388,6 @@ class PerspectiveTrainer(object):
                 loss = pg_loss - self.args.ent_coef * entropy_loss + v_loss * self.args.vf_coef - \
                        div_loss * self.args.div_coef + proj_loss * self.args.cover_coef - \
                        mu_div_loss * self.args.mu_div_coef
-                # loss = proj_loss * self.args.cover_coef
 
                 optimizer.zero_grad()
                 loss.backward()

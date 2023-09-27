@@ -8,9 +8,9 @@ from src.loss.centernet_loss import _transpose_and_gather_feat
 LINSPACE_STEPS = 200
 
 
-def cover_loss(proj_mats, cover_map, history_cover_maps, b_world_gts, dataset, cover_clamp):
-    device = cover_map.device
-    B, _, H, W = cover_map.shape
+def cover_loss(proj_mats, covermap, history_cover_maps, b_world_gts, dataset, cover_clamp):
+    device = covermap.device
+    B, _, H, W = covermap.shape
     # image of shape C,H,W (C,N_row,N_col); xy-indexing; x,y (w,h) (n_col,n_row)
     # image border, xy-indexing
     h, w = dataset.img_shape
@@ -37,7 +37,7 @@ def cover_loss(proj_mats, cover_map, history_cover_maps, b_world_gts, dataset, c
         torch.cdist(pedestrian_xys.float(), border).min(dim=2)[0]
         for border in [proj_top, proj_left, proj_bottom, proj_right, proj_center]]
     # visibility and weight for pedestrian in each view
-    is_visible = _transpose_and_gather_feat(cover_map.detach().bool(), pedestrian_idx)[..., 0]
+    is_visible = _transpose_and_gather_feat(covermap.detach().bool(), pedestrian_idx)[..., 0]
     map_weights = torch.tanh(1 + history_cover_maps.sum(dim=1, keepdims=True)) - \
                   torch.tanh(history_cover_maps.sum(dim=1, keepdims=True))
     # map_weights = ~history_cover_maps.sum(dim=1, keepdims=True).bool()
