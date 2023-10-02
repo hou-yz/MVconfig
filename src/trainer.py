@@ -367,17 +367,19 @@ class PerspectiveTrainer(object):
                 mb_action_history = b_actions[b_action_history_inds[mb_inds]].cuda()
                 # action_dist = dist_l2(self.action_mapping(probs.loc[:, None]),
                 #                       self.action_mapping(mb_action_history))
-                action_dist = dist_action(self.action_mapping(probs.loc[:, None]),
-                                          self.action_mapping(mb_action_history),
-                                          dataset.action_names,
-                                          self.args.div_xy_coef,
-                                          self.args.div_yaw_coef)
+                action_dist, (xy, _, delta_xy, _) = dist_action(self.action_mapping(probs.loc[:, None]),
+                                                                self.action_mapping(mb_action_history),
+                                                                dataset.action_names,
+                                                                self.args.div_xy_coef,
+                                                                self.args.div_yaw_coef, True)
                 min_dist = torch.zeros([B]).cuda()
                 for b in range(B):
                     step = b_step[mb_inds][b].item()
                     if step > 0:
                         min_dist[b] += torch.min(action_dist[b, :step])
                 steps_div = torch.clamp(min_dist, 0, self.args.div_clamp).mean()
+                # make sure cameras won't look directly outside
+                delta_dir = torch.clamp((xy + 0.1 * delta_xy).norm(dim=-1) - xy.norm(dim=-1), 0, None).mean() / 0.1
                 # action diversity in terms of \mu
                 mu_div_ = torch.zeros([dataset.num_cam]).cuda()
                 for step in range(1, dataset.num_cam):  # skip the initial step as that one should be the same guess
@@ -413,10 +415,13 @@ class PerspectiveTrainer(object):
                 # recons_loss = F.binary_cross_entropy(torch.sigmoid(covermap_recons), overall_covermap.float()) + \
                 #               ((torch.sigmoid(heatmap_recons) - overall_heatmap).abs() * overall_covermap).mean()
                 loss = pg_loss - self.args.ent_coef * entropy_loss + v_loss * self.args.vf_coef - \
-                       steps_div * 0.3 ** ((epoch_ - 1) // self.args.steps_div_epochs) * self.args.steps_div_coef - \
-                       proj_cover * self.args.cover_coef - \
-                       mu_div * self.args.mu_div_coef + recons_loss * self.args.autoencoder_coef
+                       (steps_div * self.args.steps_div_coef + mu_div * self.args.mu_div_coef +
+                        proj_cover * self.args.cover_coef - delta_dir * self.args.dir_coef
+                        ) * self.args.reg_decay_factor ** ((epoch_ - 1) // self.args.reg_decay_epochs) + \
+                       recons_loss * self.args.autoencoder_coef
 
+                # fix the action_std for the initial epochs
+                optimizer.param_groups[-1]['lr'] = (epoch_ > self.args.std_wait_epochs) * self.args.control_lr
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.agent.parameters(), self.args.max_grad_norm)
@@ -441,16 +446,18 @@ class PerspectiveTrainer(object):
             self.writer.add_scalar("losses/clipfrac", np.mean(clipfracs), self.rl_global_step)
             self.writer.add_scalar("losses/explained_variance", explained_var, self.rl_global_step)
             self.writer.add_scalar("losses/steps_div", steps_div.item(), self.rl_global_step)
-            self.writer.add_scalar("losses/ppl_cover", proj_cover.item(), self.rl_global_step)
             self.writer.add_scalar("losses/mu_div", mu_div.item(), self.rl_global_step)
+            self.writer.add_scalar("losses/delta_dir", delta_dir.item(), self.rl_global_step)
+            self.writer.add_scalar("losses/ppl_cover", proj_cover.item(), self.rl_global_step)
             self.writer.add_scalar("losses/recons_loss", recons_loss.item(), self.rl_global_step)
 
         with np.printoptions(formatter={'float': '{: 0.3f}'.format}):
             # action_space = dataset.base.env.opts['env_action_space'].split('-')
             print(f'v loss: {v_loss.item():.3f}, p loss: {pg_loss.item():.3f}, ent: {entropy_loss.item():.3f}, '
-                  f'sigma: {probs.scale.detach().mean().item():.3f}, avg return: {b_returns.mean().item():.3f}\n'
-                  f'steps div: {steps_div.item():.3f}, ppl cover: {proj_cover.item():.3f}, '
-                  f'mu div: {mu_div.item():.3f}, recons loss: {recons_loss.item():.3f}')
+                  f'avg return: {b_returns.mean().item():.3f}\n'
+                  f'sigma: {probs.scale.detach().cpu().mean(dim=0).numpy()}\n'
+                  f'steps div: {steps_div.item():.3f}, mu div: {mu_div.item():.3f}, delta dir: {delta_dir.item():.3f}, '
+                  f'ppl cover: {proj_cover.item():.3f}, recons loss: {recons_loss.item():.3f}')
             # if torch.where(b_step[mb_inds] == 0)[0].numel():
             #     idx = torch.where(b_step[mb_inds] == 0)[0][0].item()
             #     mu = probs.loc.detach().cpu().numpy()

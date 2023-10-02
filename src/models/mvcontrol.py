@@ -79,8 +79,10 @@ class CamControl(nn.Module):
         # agent
         self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
                                     layer_init(nn.Linear(hidden_dim, 1), std=1.0))
-        self.actor = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
-                                   layer_init(nn.Linear(hidden_dim, len(dataset.action_names) * 2), std=0.01))
+        self.actor_mean = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
+                                        layer_init(nn.Linear(hidden_dim, len(dataset.action_names)), std=0.01))
+        self.actor_std = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
+                                       layer_init(nn.Linear(hidden_dim, len(dataset.action_names)), std=0.01))
 
         self.actstd_init = actstd_init
 
@@ -106,15 +108,14 @@ class CamControl(nn.Module):
         # query_feat = self.feat_branch(world_heatmap)
         # x[token_location] = torch.cat([self.state_token[step], query_feat], dim=-1)
         x[token_location] = self.state_token[step]
-        x = F.layer_norm(x, [x.shape[-1]]) + self.positional_embedding.to(heatmaps.device)
+        x = F.layer_norm(x, [x.shape[-1]])  # + self.positional_embedding.to(heatmaps.device)
         # CHECK: batch_first=True for transformer
         x = self.transformer(x)
         x = x[token_location]
 
         # output head
-        action_param = self.actor(x)
-        action_mean = action_param[:, 0::2]
-        action_std = F.softplus(action_param[:, 1::2] + np.log(np.exp(self.actstd_init) - 1))
+        action_mean = self.actor_mean(x)
+        action_std = F.softplus(self.actor_std(x) + np.log(np.exp(self.actstd_init) - 1))
         if not self.training and deterministic:
             # remove randomness during evaluation when deterministic=True
             return action_mean, self.critic(x), None, None

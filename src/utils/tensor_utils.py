@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 
-def dist_action(act1, act2, action_names, xy_coef=1.0, yaw_coef=1.0):
+def dist_action(act1, act2, action_names, xy_coef=1.0, yaw_coef=1.0, return_xys=False):
     dist_ = None
     if 'x' in action_names and 'y' in action_names:
         idx = [action_names.index('x'), action_names.index('y')]
@@ -12,8 +12,12 @@ def dist_action(act1, act2, action_names, xy_coef=1.0, yaw_coef=1.0):
     if 'yaw' in action_names:
         idx = action_names.index('yaw')
         yaw1, yaw2 = act1[..., idx], act2[..., idx]
-        dist_rot_ = dist_angle(yaw1, yaw2)
+        delta_xy1 = torch.stack([torch.cos(torch.deg2rad(yaw1)), torch.sin(torch.deg2rad(yaw1))], dim=-1)
+        delta_xy2 = torch.stack([torch.cos(torch.deg2rad(yaw2)), torch.sin(torch.deg2rad(yaw2))], dim=-1)
+        dist_rot_ = dist_l2(delta_xy1, delta_xy2)
         dist_ = dist_ + dist_rot_ * yaw_coef if dist_ is not None else dist_rot_ * yaw_coef
+    if return_xys:
+        return dist_, (xy1, xy2, delta_xy1, delta_xy2)
     return dist_
 
 
@@ -22,8 +26,9 @@ def dist_l2(xy1, xy2):
 
 
 def dist_angle(yaw1, yaw2):
-    angle = torch.abs(yaw1 * 180 - yaw2 * 180)
-    return torch.min(angle, 360 - angle) / 180
+    delta_xy1 = torch.stack([torch.cos(torch.deg2rad(yaw1)), torch.sin(torch.deg2rad(yaw1))], dim=-1)
+    delta_xy2 = torch.stack([torch.cos(torch.deg2rad(yaw2)), torch.sin(torch.deg2rad(yaw2))], dim=-1)
+    return dist_l2(delta_xy1, delta_xy2)
 
 
 def tanh_prime(x, thres=20):

@@ -91,10 +91,9 @@ def main(args):
 
     # logging
     RL_settings = f'RL_{args.carla_cfg}fix_{args.reward}_{"C" if args.control_arch == "conv" else "E"}_' \
-                  f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
-                  f'stdinit{args.actstd_init}tanh_ent{args.ent_coef}_cover{args.cover_coef}_' \
-                  f'divsteps{args.steps_div_coef}mu{args.mu_div_coef}_' \
-                  f'recons{args.autoencoder_coef}{"D" if args.autoencoder_detach else ""}_' \
+                  f'lr{args.control_lr}_stdtanhinit{args.actstd_init}wait{args.std_wait_epochs}_ent{args.ent_coef}_' \
+                  f'regdecay{args.reg_decay_factor}e{args.reg_decay_epochs}_' \
+                  f'cover{args.cover_coef}_divsteps{args.steps_div_coef}mu{args.mu_div_coef}_dir{args.dir_coef}_' \
                   f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{RL_settings}' \
              f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
@@ -153,11 +152,16 @@ def main(args):
 
     param_dicts = [{"params": [p for n, p in model.named_parameters()
                                if 'base' not in n and 'control' not in n and p.requires_grad],
-                    "lr": args.lr * args.other_lr_ratio, } if not args.interactive else {"params": [], "lr": 0},
+                    "lr": args.lr * args.other_lr_ratio if not args.interactive else 0, },
                    {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
-                    "lr": args.lr * args.base_lr_ratio, } if not args.interactive else {"params": [], "lr": 0},
-                   {"params": [p for n, p in model.named_parameters() if 'control' in n and p.requires_grad],
-                    "lr": args.control_lr, }]
+                    "lr": args.lr * args.base_lr_ratio if not args.interactive else 0, },
+                   {"params": [p for n, p in model.named_parameters()
+                               if 'control' in n and 'std' not in n and p.requires_grad],
+                    "lr": args.control_lr, },
+                   {"params": [p for n, p in model.named_parameters()
+                               if 'control' in n and 'std' in n and p.requires_grad],
+                    "lr": args.control_lr, },
+                   ]
     optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
     def warmup_lr_scheduler(epoch, warmup_epochs=0.1 * args.epochs):
@@ -269,15 +273,19 @@ if __name__ == '__main__':
     parser.add_argument("--target_kl", type=float, default=None,
                         help="the target KL divergence threshold")
     # additional loss/regularization
+    parser.add_argument("--std_wait_epochs", type=int, default=10)
+    parser.add_argument("--reg_decay_epochs", type=int, default=10)
+    parser.add_argument("--reg_decay_factor", type=int, default=0.1)
     parser.add_argument("--steps_div_coef", type=float, default=1.0,
                         help="coefficient of chosen action diversity")
-    parser.add_argument("--steps_div_epochs", type=int, default=10)
+    parser.add_argument("--mu_div_coef", type=float, default=0.0,
+                        help="coefficient of mean action diversity")
     parser.add_argument("--div_clamp", type=float, default=2.0,
                         help="clamp range of chosen action diversity")
     parser.add_argument("--div_xy_coef", type=float, default=1.0)
     parser.add_argument("--div_yaw_coef", type=float, default=1.0)
-    parser.add_argument("--mu_div_coef", type=float, default=0.0,
-                        help="coefficient of mean action diversity")
+    parser.add_argument("--dir_coef", type=float, default=0.0,
+                        help="coefficient of delta camera direction (compared to the location)")
     parser.add_argument("--cover_coef", type=float, default=0.0,
                         help="coefficient of the coverage")
     parser.add_argument("--cover_min_clamp", type=float, default=10,

@@ -48,14 +48,15 @@ class Counter(nn.Module):
             x = self.config_branch(configs.flatten(0, 1)).unflatten(0, [B, N])
             token_location = (torch.arange(N).repeat([B, 1]) == step[:, None])
             x[token_location] = self.state_token[step]
-            x += self.positional_embedding
             # mask out future steps
             # mask = (torch.arange(N).repeat([B, 1]) > step[:, None])
             # x[mask] = 0
+            x = F.layer_norm(x, [x.shape[-1]])  # + self.positional_embedding
             x = self.transformer(x)
             x = x[token_location]
         else:
             x = self.config_branch(configs.flatten(1, 2))
+        # x = F.normalize(self.state_token[step])
         out = self.output_head(x)
         return out
 
