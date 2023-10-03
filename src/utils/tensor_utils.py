@@ -9,13 +9,19 @@ def dist_action(act1, act2, action_names, xy_coef=1.0, yaw_coef=1.0, return_xys=
         xy1, xy2 = act1[..., idx], act2[..., idx]
         dist_loc_ = dist_l2(xy1, xy2)
         dist_ = dist_ + dist_loc_ * xy_coef if dist_ is not None else dist_loc_ * xy_coef
+    else:
+        xy1, xy2 = (torch.zeros([*act1.shape[:-1], 2], device=act1.device),
+                    torch.zeros([*act2.shape[:-1], 2], device=act2.device))
     if 'yaw' in action_names:
         idx = action_names.index('yaw')
         yaw1, yaw2 = act1[..., idx], act2[..., idx]
-        delta_xy1 = torch.stack([torch.cos(torch.deg2rad(yaw1)), torch.sin(torch.deg2rad(yaw1))], dim=-1)
-        delta_xy2 = torch.stack([torch.cos(torch.deg2rad(yaw2)), torch.sin(torch.deg2rad(yaw2))], dim=-1)
+        delta_xy1 = torch.stack([torch.cos(yaw1 * torch.pi), torch.sin(yaw1 * torch.pi)], dim=-1)
+        delta_xy2 = torch.stack([torch.cos(yaw2 * torch.pi), torch.sin(yaw2 * torch.pi)], dim=-1)
         dist_rot_ = dist_l2(delta_xy1, delta_xy2)
         dist_ = dist_ + dist_rot_ * yaw_coef if dist_ is not None else dist_rot_ * yaw_coef
+    else:
+        delta_xy1, delta_xy2 = (torch.zeros([*act1.shape[:-1], 2], device=act1.device),
+                                torch.zeros([*act2.shape[:-1], 2], device=act2.device))
     if return_xys:
         return dist_, (xy1, xy2, delta_xy1, delta_xy2)
     return dist_
@@ -26,8 +32,8 @@ def dist_l2(xy1, xy2):
 
 
 def dist_angle(yaw1, yaw2):
-    delta_xy1 = torch.stack([torch.cos(torch.deg2rad(yaw1)), torch.sin(torch.deg2rad(yaw1))], dim=-1)
-    delta_xy2 = torch.stack([torch.cos(torch.deg2rad(yaw2)), torch.sin(torch.deg2rad(yaw2))], dim=-1)
+    delta_xy1 = torch.stack([torch.cos(yaw1 * torch.pi), torch.sin(yaw1 * torch.pi)], dim=-1)
+    delta_xy2 = torch.stack([torch.cos(yaw2 * torch.pi), torch.sin(yaw2 * torch.pi)], dim=-1)
     return dist_l2(delta_xy1, delta_xy2)
 
 
