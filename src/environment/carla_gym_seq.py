@@ -39,26 +39,22 @@ def run_carla(carla_path, off_screen=False, quality="Epic", gpu=2, port=2000):
 
 
 def encode_camera_cfg(cfg, opts):
-    [x, y, z, pitch, yaw, roll, fov] = cfg
+    is_tensor = isinstance(cfg, torch.Tensor)
+    device = cfg.device if is_tensor else 'cpu'
+    cfg = torch.tensor(cfg, dtype=torch.float) if not is_tensor else cfg
+    # action is for a SINGLE camera
     # convert cfg: location/rotation/fov from different ranges to [-1, 1]
-    # location
+    # [x, y, z, pitch, yaw, roll, fov] = cfg
     # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
-    x_min, x_max, y_min, y_max, z_min, z_max = opts["spawn_area"]
-    x = (x - x_min) / (x_max - x_min) * 2 - 1
-    y = (y - y_min) / (y_max - y_min) * 2 - 1
-    z = (z - z_min) / (z_max - z_min) * 2 - 1
-    location = np.array([x, y, z])
-    # rotation
     # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
-    pitch = pitch / 90
-    yaw = yaw / 180
-    roll = roll / 180
-    rotation = np.array([pitch, yaw, roll])
     # fov \in [0, 180]
-    fov = np.array(fov / 90 - 1).reshape(-1)
-    # put location, rotation, fov together
-    cfg = np.concatenate([location, rotation, fov])
-    return cfg
+    x_min, x_max, y_min, y_max, z_min, z_max = opts["spawn_area"]
+    weight = torch.tensor([(x_max - x_min) / 2, (y_max - y_min) / 2, (z_max - z_min) / 2, 90, 180, 180, 90],
+                          device=device)
+    bias = torch.tensor([(x_max + x_min) / 2, (y_max + y_min) / 2, (z_max + z_min) / 2, 0, 0, 0, 90],
+                        device=device)
+    _cfg = (cfg - bias) / weight
+    return _cfg if is_tensor else _cfg.tolist()
 
 
 def decode_camera_cfg(cfg, opts):
@@ -66,21 +62,15 @@ def decode_camera_cfg(cfg, opts):
     # action is for a SINGLE camera
     # convert cfg: location/rotation/fov from [-1, 1] to different ranges
     # [x, y, z, pitch, yaw, roll, fov] = cfg
-    # location
     # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
-    x_min, x_max, y_min, y_max, z_min, z_max = opts["spawn_area"]
-    cfg[0] = (cfg[0] + 1) / 2 * (x_max - x_min) + x_min
-    cfg[1] = (cfg[1] + 1) / 2 * (y_max - y_min) + y_min
-    cfg[2] = (cfg[2] + 1) / 2 * (z_max - z_min) + z_min
-    # rotation
     # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
-    cfg[3] = cfg[3] * 90
-    cfg[4] = cfg[4] * 180
-    cfg[5] = cfg[5] * 180
     # fov \in [0, 180]
-    cfg[6] = (cfg[6] + 1) * 90
-    # put location, rotation, fov together
-    return cfg
+    x_min, x_max, y_min, y_max, z_min, z_max = opts["spawn_area"]
+    weight = torch.tensor([(x_max - x_min) / 2, (y_max - y_min) / 2, (z_max - z_min) / 2, 90, 180, 180, 90],
+                          device=device)
+    bias = torch.tensor([(x_max + x_min) / 2, (y_max + y_min) / 2, (z_max + z_min) / 2, 0, 0, 0, 90],
+                        device=device)
+    return cfg * weight + bias
 
 
 def draw_bbox(obs, info):
@@ -144,6 +134,9 @@ class CarlaCameraSeqEnv(gym.Env):
 
         self.config_dim = 7
         self.action_names = self.opts["env_action_space"].split("-")
+        config_id_dict = {'x': 0, 'y': 1, 'z': 2, 'pitch': 3, 'yaw': 4, 'roll': 5, 'fov': 6}
+        action_ids = [config_id_dict[key] for key in self.action_names]
+        self.action_mapping = torch.arange(self.config_dim)[:, None] == torch.tensor(action_ids)[None]
 
         # Define any other attributes or variables needed for your environment
         # turn on sync mode
@@ -181,27 +174,17 @@ class CarlaCameraSeqEnv(gym.Env):
         # convert normalised action space to unnormalised ones
         if not isinstance(act, torch.Tensor):
             act = torch.tensor(act, dtype=torch.float, device=device)
-        action_dim_dict = {'x': 0, 'y': 1, 'z': 2, 'pitch': 3, 'yaw': 4, 'roll': 5, 'fov': 6}
-        _action = torch.zeros(self.config_dim, device=device)
-        for i, action_name in enumerate(self.action_names):
-            _action[action_dim_dict[action_name]] = act[i]
+        _action = self.action_mapping.to(device).float() @ act
         _action = torch.clamp(_action, -1, 1)
         _cfg = decode_camera_cfg(_action, self.opts)
-        _location, _rotation, _fov = _cfg[:3], _cfg[3:6], _cfg[[6]]
         # default settings for limited action space
         location, rotation, fov = torch.tensor(self.opts["cam_pos_lst"], device=device)[cam], \
             torch.tensor(self.opts["cam_dir_lst"], device=device)[cam], \
             torch.tensor(self.opts["cam_fov"], device=device).reshape([-1])
-        if 'x' in self.action_names: location[0] = _location[0]
-        if 'y' in self.action_names: location[1] = _location[1]
-        if 'z' in self.action_names: location[2] = _location[2]
-        if 'pitch' in self.action_names: rotation[0] = _rotation[0]
-        if 'yaw' in self.action_names: rotation[1] = _rotation[1]
-        if 'roll' in self.action_names: rotation[2] = _rotation[2]
-        if 'fov' in self.action_names: fov = _fov
-
-        action = torch.cat([location, rotation, fov])
-        return action
+        default_cfg = torch.cat([location, rotation, fov])
+        use_default = self.action_mapping.sum(dim=1).bool().to(device)
+        cfg = _cfg * use_default + default_cfg * ~use_default
+        return cfg
 
     def reset(self, seed=None, motion=False):
         # if a new seed is provided, set generator to used new seed
