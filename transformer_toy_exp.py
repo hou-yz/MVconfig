@@ -5,9 +5,9 @@ from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torch.optim import Adam
+from src.parameters import *
 from src.models.mvcontrol import create_pos_embedding
 
-CONFIGS_PADDING_VALUE = -3
 
 
 class NumWordDataset(Dataset):

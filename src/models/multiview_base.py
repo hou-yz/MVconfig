@@ -3,8 +3,8 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
+from src.parameters import *
 
-STD_PADDING_VALUE = 0
 
 
 def aggregate_feat(feat, aggregation='mean'):

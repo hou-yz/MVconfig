@@ -5,18 +5,17 @@ import time
 import random
 from operator import itemgetter
 from PIL import Image
+import matplotlib.pyplot as plt
 from kornia.geometry import warp_perspective
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
 from torchvision.datasets import VisionDataset
+from src.parameters import *
 from src.utils.projection import *
 from src.utils.image_utils import draw_umich_gaussian, random_affine
 from src.utils.tensor_utils import to_tensor
-import matplotlib.pyplot as plt
-
-CONFIGS_PADDING_VALUE = -3
 
 
 def get_centernet_gt(Rshape, x_s, y_s, v_s, w_s=None, h_s=None, reduce=4, top_k=100, kernel_size=4):
