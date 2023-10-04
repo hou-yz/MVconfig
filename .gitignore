@@ -1,4 +1,7 @@
-cfg/*
+.idea
+imgs*
+.vscode/
+logs/*
 runs/*
 
 # Set the default behavior for all files.
@@ -129,8 +132,3 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-
-.idea
-imgs*
-.vscode/
-logs/*
