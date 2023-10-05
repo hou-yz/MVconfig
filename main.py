@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from src.datasets import *
 from src.models.mvdet import MVDet
+from src.models.mvcontrol import CamControl
 from src.utils.logger import Logger
 from src.utils.draw_curve import draw_curve
 from src.utils.str2bool import str2bool
@@ -58,6 +59,8 @@ def main(args):
         base = CarlaX(dataset_config, port=args.carla_port, tm_port=args.carla_tm_port)
         args.num_workers = 0
         args.batch_size = 1
+        if not args.interactive:
+            args.base_lr_ratio = args.other_lr_ratio = 0
     else:
         if args.dataset == 'wildtrack':
             base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
@@ -90,8 +93,9 @@ def main(args):
                              pin_memory=True, worker_init_fn=seed_worker)
 
     # logging
-    RL_settings = f'RL_{args.carla_cfg}fix_{args.reward}_{"C" if args.control_arch == "conv" else "E"}_' \
-                  f'lr{args.control_lr}_stdtanhinit{args.actstd_init}wait{args.std_wait_epochs}_ent{args.ent_coef}_' \
+    RL_settings = f'RL_{args.carla_cfg}fix_{args.reward}_{"NO_PPO_" if not args.use_ppo else ""}' \
+                  f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
+                  f'stdwait{args.std_wait_epochs}ratio{args.std_lr_ratio}_ent{args.ent_coef}_' \
                   f'regdecay{args.reg_decay_factor}e{args.reg_decay_epochs}_' \
                   f'cover{args.cover_coef}_divsteps{args.steps_div_coef}mu{args.mu_div_coef}_dir{args.dir_coef}_' \
                   f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
@@ -110,8 +114,7 @@ def main(args):
     print(vars(args))
 
     # model
-    model = MVDet(train_set, args.arch, args.aggregation,
-                  args.use_bottleneck, args.hidden_dim, args.outfeat_dim, args.control_arch, args.actstd_init).cuda()
+    model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim).cuda()
 
     # load checkpoint
     if args.interactive:
@@ -131,12 +134,14 @@ def main(args):
                                                                      for key, value in vars(args).items()])))
         else:
             writer = None
+
+        control_module = CamControl(train_set, model.base_dim, args.actstd_init).cuda()
     else:
         if not args.eval:
             with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}.txt', 'w') as fp:
                 fp.write(logdir)
-
         writer = None
+        control_module = None
 
     if args.resume:
         load_dir = f'logs/{args.dataset}/{args.resume}'
@@ -150,19 +155,23 @@ def main(args):
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
 
-    param_dicts = [{"params": [p for n, p in model.named_parameters()
-                               if 'base' not in n and 'control' not in n and p.requires_grad],
-                    "lr": args.lr * args.other_lr_ratio if not args.interactive else 0, },
-                   {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
-                    "lr": args.lr * args.base_lr_ratio if not args.interactive else 0, },
-                   {"params": [p for n, p in model.named_parameters()
-                               if 'control' in n and 'std' not in n and p.requires_grad],
-                    "lr": args.control_lr, },
-                   {"params": [p for n, p in model.named_parameters()
-                               if 'control' in n and 'std' in n and p.requires_grad],
-                    "lr": args.control_lr, },
-                   ]
-    optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+    if args.interactive:
+        param_dicts = [{"params": [p for n, p in control_module.named_parameters()
+                                   if 'std' not in n and p.requires_grad],
+                        "lr": args.control_lr, },
+                       {"params": [p for n, p in control_module.named_parameters()
+                                   if 'std' in n and p.requires_grad],
+                        "lr": args.control_lr * args.std_lr_ratio, },
+                       ]
+    else:
+        param_dicts = [{"params": [p for n, p in model.named_parameters()
+                                   if 'base' not in n and p.requires_grad],
+                        "lr": args.lr * args.other_lr_ratio, },
+                       {"params": [p for n, p in model.named_parameters()
+                                   if 'base' in n and p.requires_grad],
+                        "lr": args.lr * args.base_lr_ratio, },
+                       ]
+    optimizer = optim.Adam(param_dicts, weight_decay=args.weight_decay)
 
     def warmup_lr_scheduler(epoch, warmup_epochs=0.1 * args.epochs):
         if epoch < warmup_epochs:
@@ -174,7 +183,7 @@ def main(args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler) if not args.interactive \
         else None  # torch.optim.lr_scheduler.StepLR(optimizer, step_size=20)
 
-    trainer = PerspectiveTrainer(model, logdir, writer, args)
+    trainer = PerspectiveTrainer(model, control_module, logdir, writer, args)
 
     # draw curve
     x_epoch = []
@@ -201,7 +210,10 @@ def main(args):
             test_prec_s.append(test_prec[0])
             draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s,
                        train_prec_s, test_prec_s)
-            torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
+            if args.interactive:
+                torch.save(control_module.state_dict(), os.path.join(logdir, 'control_module.pth'))
+            else:
+                torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
 
     print('Test loaded model...')
     print(logdir)
@@ -236,7 +248,7 @@ if __name__ == '__main__':
     # MVcontrol settings
     parser.add_argument('--interactive', action='store_true')
     parser.add_argument('--carla_cfg', type=str, default='1')
-    parser.add_argument('--control_arch', default='transformer', choices=['conv', 'transformer'])
+    # parser.add_argument('--control_arch', default='transformer', choices=['conv', 'transformer'])
     parser.add_argument('--rl_deterministic', type=str2bool, default=True)
     parser.add_argument('--carla_port', type=int, default=2000)
     parser.add_argument('--carla_tm_port', type=int, default=8000)
@@ -247,9 +259,9 @@ if __name__ == '__main__':
     parser.add_argument("--reward", default='moda')
     # https://www.reddit.com/r/reinforcementlearning/comments/n09ns2/explain_why_ppo_fails_at_this_very_simple_task/
     # https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
-    parser.add_argument("--ppo_steps", type=int, default=256,
+    parser.add_argument("--ppo_steps", type=int, default=512,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
-    parser.add_argument("--rl_minibatch_size", type=int, default=32,
+    parser.add_argument("--rl_minibatch_size", type=int, default=64,
                         help="RL mini-batches, default: 64")
     parser.add_argument("--rl_update_epochs", type=int, default=5,
                         help="the K epochs to update the policy, default: 10")
@@ -273,9 +285,11 @@ if __name__ == '__main__':
     parser.add_argument("--target_kl", type=float, default=None,
                         help="the target KL divergence threshold")
     # additional loss/regularization
-    parser.add_argument("--std_wait_epochs", type=int, default=10)
+    parser.add_argument("--use_ppo", type=str2bool, default=True)
+    parser.add_argument("--std_wait_epochs", type=int, default=0)
+    parser.add_argument("--std_lr_ratio", type=float, default=1.0)
     parser.add_argument("--reg_decay_epochs", type=int, default=10)
-    parser.add_argument("--reg_decay_factor", type=int, default=0.1)
+    parser.add_argument("--reg_decay_factor", type=float, default=0.1)
     parser.add_argument("--steps_div_coef", type=float, default=1.0,
                         help="coefficient of chosen action diversity")
     parser.add_argument("--mu_div_coef", type=float, default=0.0,
@@ -283,8 +297,8 @@ if __name__ == '__main__':
     parser.add_argument("--div_clamp", type=float, default=2.0,
                         help="clamp range of chosen action diversity")
     parser.add_argument("--div_xy_coef", type=float, default=1.0)
-    parser.add_argument("--div_yaw_coef", type=float, default=1.0)
-    parser.add_argument("--dir_coef", type=float, default=0.0,
+    parser.add_argument("--div_yaw_coef", type=float, default=0.5)
+    parser.add_argument("--dir_coef", type=float, default=1.0,
                         help="coefficient of delta camera direction (compared to the location)")
     parser.add_argument("--cover_coef", type=float, default=0.0,
                         help="coefficient of the coverage")
