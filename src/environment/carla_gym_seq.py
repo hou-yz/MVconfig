@@ -5,18 +5,36 @@ import random
 import subprocess
 import time
 import math
+import docker
 import carla
 import cv2
 import gym
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+from src.parameters import *
 from src.environment.cameras import build_cam
 
-# render quality of CARLA
-QUALITY = ("Epic", "Low")
-NUM_TICKS = 3
-SLEEP_TIME = 0.05
+
+# docker run --privileged --gpus 1 --net=host -e DISPLAY=$DISPLAY carlasim/carla:0.9.14 /bin/bash ./CarlaUE4.sh
+# docker run --privileged --gpus 1 --net=host -v /tmp/.X11-unix:/tmp/.X11-unix:rw carlasim/carla:0.9.14 /bin/bash ./CarlaUE4.sh -RenderOffScreen
+def docker_run_carla(gpu=0, carla_port=2000):
+    client = docker.from_env()
+    container = client.containers.run("carlasim/carla:0.9.14",
+                                      command=f'/bin/bash ./CarlaUE4.sh -RenderOffScreen -carla-rpc-port={carla_port}',
+                                      detach=True,
+                                      privileged=True,
+                                      network_mode="host",
+                                      environment={},
+                                      volumes={'/tmp/.X11-unix': {'bind': '/tmp/.X11-unix', 'mode': 'rw'}},
+                                      device_requests=[docker.types.DeviceRequest(driver='nvidia',
+                                                                                  device_ids=[str(gpu)],
+                                                                                  capabilities=[['gpu']])])
+    # wait for carla to start
+    while container.status == "created":
+        container.reload()
+        time.sleep(2)
+    return container
 
 
 #  ./CarlaUE4.sh -RenderOffScreen  -ini:[/Script/Engine.RendererSettings]:r.GraphicsAdapter=0 -carla-rpc-port=2000
@@ -48,7 +66,7 @@ def encode_camera_cfg(cfg, opts):
     # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
     # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
     # fov \in [0, 180]
-    x_min, x_max, y_min, y_max, z_min, z_max = opts["spawn_area"]
+    x_min, x_max, y_min, y_max, z_min, z_max = opts["camera_area"]
     weight = torch.tensor([(x_max - x_min) / 2, (y_max - y_min) / 2, (z_max - z_min) / 2, 90, 180, 180, 90],
                           device=device)
     bias = torch.tensor([(x_max + x_min) / 2, (y_max + y_min) / 2, (z_max + z_min) / 2, 0, 0, 0, 90],
@@ -65,7 +83,7 @@ def decode_camera_cfg(cfg, opts):
     # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
     # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
     # fov \in [0, 180]
-    x_min, x_max, y_min, y_max, z_min, z_max = opts["spawn_area"]
+    x_min, x_max, y_min, y_max, z_min, z_max = opts["camera_area"]
     weight = torch.tensor([(x_max - x_min) / 2, (y_max - y_min) / 2, (z_max - z_min) / 2, 90, 180, 180, 90],
                           device=device)
     bias = torch.tensor([(x_max + x_min) / 2, (y_max + y_min) / 2, (z_max + z_min) / 2, 0, 0, 0, 90],
@@ -398,10 +416,10 @@ class CarlaCameraSeqEnv(gym.Env):
 
             # 5. initialize each controller and set target to walk to (list is [controler, actor, controller, actor ...])
             for pedestrian in self.pedestrians:
-                # start walker
-                if pedestrian['type'] != 'chat':
-                    ai_controller = self.world.get_actor(pedestrian['controller'])
-                    ai_controller.start()
+                ai_controller = self.world.get_actor(pedestrian['controller'])
+                ai_controller.start()
+                # start walking
+                if pedestrian['type'] != 'chat' and motion:
                     # set walk to random point
                     destination_x = self.random_generator.uniform(min_x, max_x)
                     destination_y = self.random_generator.uniform(min_y, max_y)
@@ -410,8 +428,6 @@ class CarlaCameraSeqEnv(gym.Env):
                     ai_controller.go_to_location(destination)
                     # max speed
                     ai_controller.set_max_speed(pedestrian['speed'])
-        # else:
-        #     self.world.tick()
         pass
 
     def update_pedestrian_gts(self):
@@ -577,6 +593,8 @@ if __name__ == '__main__':
     import json
     from tqdm import tqdm
     import torchvision.transforms as T
+
+    container = docker_run_carla(1)
 
     with open('../../cfg/RL/1_6dof.cfg', "r") as fp:
         dataset_config = json.load(fp)

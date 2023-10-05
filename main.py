@@ -17,6 +17,7 @@ from torch import optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from src.datasets import *
+from src.environment.carla_gym_seq import docker_run_carla
 from src.models.mvdet import MVDet
 from src.models.mvcontrol import CamControl
 from src.utils.logger import Logger
@@ -52,15 +53,18 @@ def main(args):
     else:
         torch.backends.cudnn.benchmark = True
 
+    # increase process niceness
+    os.nice(10)
+
     # dataset
     if args.dataset == 'carlax':
+        carla_container = docker_run_carla(args.carla_gpu, args.carla_port)
+        time.sleep(10)
         with open(f'./cfg/RL/{args.carla_cfg}.cfg', "r") as fp:
             dataset_config = json.load(fp)
         base = CarlaX(dataset_config, port=args.carla_port, tm_port=args.carla_tm_port)
         args.num_workers = 0
         args.batch_size = 1
-        if not args.interactive:
-            args.base_lr_ratio = args.other_lr_ratio = 0
     else:
         if args.dataset == 'wildtrack':
             base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
@@ -220,7 +224,11 @@ def main(args):
     trainer.test(test_loader)
     if args.dataset == 'carlax':
         base.env.close()
-    if args.interactive:
+        carla_container.stop()
+        while carla_container.status != "exited":
+            carla_container.reload()
+            time.sleep(2)
+    if args.interactive and not is_debug:
         writer.close()
 
 
@@ -252,6 +260,7 @@ if __name__ == '__main__':
     parser.add_argument('--rl_deterministic', type=str2bool, default=True)
     parser.add_argument('--carla_port', type=int, default=2000)
     parser.add_argument('--carla_tm_port', type=int, default=8000)
+    parser.add_argument('--carla_gpu', type=int, default=0)
     # RL arguments
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
     # https://arxiv.org/abs/2006.05990
@@ -268,13 +277,13 @@ if __name__ == '__main__':
     parser.add_argument('--gamma', type=float, default=0.99, help='reward discount factor, default: 0.99')
     parser.add_argument("--gae", type=str2bool, default=True,
                         help="Use GAE for advantage computation")
-    parser.add_argument("--gae_lambda", type=float, default=0.95,
+    parser.add_argument("--gae_lambda", type=float, default=0.9,
                         help="the lambda for the general advantage estimation")
     parser.add_argument("--norm_adv", type=str2bool, default=True,
                         help="Toggles advantages normalization")
-    parser.add_argument("--clip_coef", type=float, default=0.2,
+    parser.add_argument("--clip_coef", type=float, default=0.25,
                         help="the surrogate clipping coefficient")
-    parser.add_argument("--clip_vloss", type=str2bool, default=True,
+    parser.add_argument("--clip_vloss", type=str2bool, default=False,
                         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--ent_coef", type=float, default=0.001,
                         help="coefficient of the entropy")
@@ -289,16 +298,16 @@ if __name__ == '__main__':
     parser.add_argument("--std_wait_epochs", type=int, default=0)
     parser.add_argument("--std_lr_ratio", type=float, default=1.0)
     parser.add_argument("--reg_decay_epochs", type=int, default=10)
-    parser.add_argument("--reg_decay_factor", type=float, default=0.1)
-    parser.add_argument("--steps_div_coef", type=float, default=1.0,
+    parser.add_argument("--reg_decay_factor", type=float, default=1.0)
+    parser.add_argument("--steps_div_coef", type=float, default=0.3,
                         help="coefficient of chosen action diversity")
     parser.add_argument("--mu_div_coef", type=float, default=0.0,
                         help="coefficient of mean action diversity")
     parser.add_argument("--div_clamp", type=float, default=2.0,
                         help="clamp range of chosen action diversity")
-    parser.add_argument("--div_xy_coef", type=float, default=1.0)
+    parser.add_argument("--div_xy_coef", type=float, default=1.5)
     parser.add_argument("--div_yaw_coef", type=float, default=0.5)
-    parser.add_argument("--dir_coef", type=float, default=1.0,
+    parser.add_argument("--dir_coef", type=float, default=0.3,
                         help="coefficient of delta camera direction (compared to the location)")
     parser.add_argument("--cover_coef", type=float, default=0.0,
                         help="coefficient of the coverage")
