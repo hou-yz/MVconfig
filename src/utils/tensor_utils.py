@@ -66,7 +66,10 @@ def expectation(probs, x_range, func, n_points=1000, device='cpu'):
         for c in range(C):
             x[b, c] = torch.linspace(float(x_range[0][b, c]), float(x_range[1][b, c]), n_points, device=device)
     log_probs = torch.stack([probs.log_prob(x[:, :, i]) for i in range(n_points)], dim=2)
-    return torch.trapz(torch.exp(log_probs) * func(x), x)
+    if torch.any(torch.isinf(log_probs)):
+        print('**************** inf log_probs ****************')
+    probs = torch.exp(log_probs) * ~torch.isinf(log_probs)  # + 0 * torch.isinf(log_probs)
+    return torch.trapz(probs * func(x), x)
 
 
 def to_tensor(x, dtype=torch.float, device='cpu'):

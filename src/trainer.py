@@ -254,7 +254,7 @@ class PerspectiveTrainer(object):
         if 'avgcover' in self.args.reward:  # dense
             rewards += obs_covermaps_.mean(dim=[1, 2])[1:] * 0.1  # dense
         if 'weightcover' in self.args.reward:
-            rewards += weighted_cover_map.sum(dim=[1, 2]) / world_gt['heatmap'].sum()
+            rewards += weighted_cover_map.sum(dim=[1, 2]) / (world_gt['heatmap'].sum() + 1e-8)
         if 'loss' in self.args.reward:
             rewards += (-task_losses[1:] + task_losses[:-1])  # dense
             # rewards[-1] += -task_losses[-1]  # final step
@@ -409,7 +409,7 @@ class PerspectiveTrainer(object):
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds].cuda()) ** 2).mean()
 
                 # https://arxiv.org/pdf/2006.05990.pdf
                 # section B.8
@@ -428,12 +428,11 @@ class PerspectiveTrainer(object):
                                                                 dataset.action_names,
                                                                 self.args.div_xy_coef,
                                                                 self.args.div_yaw_coef, True)
-                mean_dist = torch.zeros([B]).cuda()
-                for b in range(B):
-                    step = b_step[mb_inds][b].item()
-                    if step > 0:
-                        mean_dist[b] += action_dist[b, :step].mean()
-                steps_div = torch.clamp(mean_dist, 0, self.args.div_clamp).mean()
+                steps_mask = torch.arange(N).repeat([B, 1]) < b_step[mb_inds, None]
+                if steps_mask.any():
+                    steps_div = torch.clamp(action_dist[steps_mask], 0, self.args.div_clamp).mean()
+                else:
+                    steps_div = torch.zeros([]).cuda()
                 # make sure cameras won't look directly outside
                 delta_dir = torch.clamp((xy + 0.1 * delta_xy).norm(dim=-1) - xy.norm(dim=-1), 0, None).mean() / 0.1
                 # action diversity in terms of \mu
@@ -456,7 +455,7 @@ class PerspectiveTrainer(object):
                 mu_cover_map *= visible_masks
                 mb_world_gts = {key: b_world_gts[key][b_world_gt_idx[mb_inds]] for key in b_world_gts.keys()}
                 proj_cover = torch.tanh(mu_cover_map.sum(dim=0, keepdims=True)) * mb_world_gts['heatmap'].cuda()
-                proj_cover = (proj_cover.sum(dim=[2, 3]) / mb_world_gts['heatmap'].cuda().sum(dim=[2, 3])).mean()
+                proj_cover = (proj_cover.sum([2, 3]) / (mb_world_gts['heatmap'].cuda().sum([2, 3]) + 1e-8)).mean()
                 # proj_cover = -cover_loss(mu_proj_mats, mu_cover_map, history_cover_maps, mb_world_gts, dataset,
                 #                        [self.args.cover_min_clamp, self.args.cover_max_clamp])
                 recons_loss = torch.zeros([]).cuda()
@@ -473,6 +472,12 @@ class PerspectiveTrainer(object):
                         recons_loss * self.args.autoencoder_coef
                         ) * self.args.reg_decay_factor ** ((epoch_ - 1) // self.args.reg_decay_epochs)
 
+                if torch.isnan(loss):
+                    print('**************** nan loss ****************')
+                    print(pg_loss, v_loss, entropy_loss, steps_div, mu_div, proj_cover, delta_dir, recons_loss)
+                if torch.isinf(loss):
+                    print('**************** inf loss ****************')
+                    print(pg_loss, v_loss, entropy_loss, steps_div, mu_div, proj_cover, delta_dir, recons_loss)
                 # fix the action_std for the initial epochs
                 optimizer.param_groups[-1]['lr'] = (epoch_ > self.args.std_wait_epochs) * \
                                                    self.args.control_lr * self.args.std_lr_ratio
