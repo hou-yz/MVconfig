@@ -49,7 +49,7 @@ class ConvDecoder(nn.Module):
 
 
 class CamControl(nn.Module):
-    def __init__(self, dataset, hidden_dim, arch='transformer', actstd_init=1.0):
+    def __init__(self, dataset, hidden_dim, actstd_init=1.0):
         super().__init__()
         self.RRworld_shape = tuple(map(lambda x: x // 32, dataset.Rworld_shape))
         self.feat_branch = nn.Sequential(nn.Conv2d(1, hidden_dim, 3, 2, 1), nn.ReLU(),
@@ -60,29 +60,30 @@ class CamControl(nn.Module):
                                          nn.ReLU(),
                                          nn.Linear(hidden_dim * 4, hidden_dim * 4), nn.ReLU(),
                                          nn.Linear(hidden_dim * 4, hidden_dim))
-        self.config_branch = nn.Sequential(nn.Linear(dataset.config_dim, hidden_dim), nn.ReLU(),
-                                           nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+        self.config_branch = nn.Sequential(nn.Linear(dataset.config_dim, hidden_dim), nn.LeakyReLU(),
+                                           nn.Linear(hidden_dim, hidden_dim), nn.LeakyReLU(),
                                            nn.Linear(hidden_dim, hidden_dim))
         self.feat_decoder = ConvDecoder(dataset.Rworld_shape, hidden_dim)
 
         # transformer
-        self.positional_embedding = create_pos_embedding(dataset.num_cam, hidden_dim)
-        # self.positional_embedding = nn.Parameter(torch.randn(dataset.num_cam + 1, hidden_dim))
+        # self.positional_embedding = create_pos_embedding(dataset.num_cam, hidden_dim)
+        self.padding_token = nn.Parameter(torch.randn(hidden_dim))
         # CHECK: batch_first=True for transformer
         # NOTE: by default nn.Transformer() has enable_nested_tensor=True in its nn.TransformerEncoder(),
         # which can cause `src` to change from [B, 4, C] into [B, 1<=n<=3, C] when given `src_key_padding_mask`,
         # raising error for nn.TransformerDecoder()
         encoder_layer = nn.TransformerEncoderLayer(hidden_dim, 8, hidden_dim * 4, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, 3)
-        self.state_token = nn.Parameter(torch.randn(dataset.num_cam, hidden_dim))
+        self.state_token = nn.Parameter(torch.randn([dataset.num_cam, hidden_dim]))
 
         # agent
-        self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
+        self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
                                     layer_init(nn.Linear(hidden_dim, 1), std=1.0))
-        self.actor_mean = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
+        self.actor_mean = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
                                         layer_init(nn.Linear(hidden_dim, len(dataset.action_names)), std=0.01))
-        self.actor_std = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
+        self.actor_std = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.LeakyReLU(),
                                        layer_init(nn.Linear(hidden_dim, len(dataset.action_names)), std=0.01))
+        # self.actor_std = nn.Parameter(torch.zeros([len(dataset.action_names)]))
 
         self.actstd_init = actstd_init
 
@@ -91,14 +92,14 @@ class CamControl(nn.Module):
 
     def get_action_and_value(self, state, action=None, deterministic=False):
         heatmaps, configs, world_heatmap, step = state
-        B, N, H, W = heatmaps.shape
+        B, N, _ = configs.shape
 
         # transformer
         # x = x_feat = self.feat_branch(heatmaps.flatten(0, 1)[:, None]).unflatten(0, [B, N])
         # x_feat = self.feat_branch(heatmaps.max(dim=1, keepdim=True)[0])
-        x_config = self.config_branch(configs.flatten(0, 1).to(heatmaps.device)).unflatten(0, [B, N])
-        # masked_location = torch.arange(N).repeat([B, 1]) > step[:, None]
-        # x_config[masked_location] = 0
+        x_config = self.config_branch(configs.flatten(0, 1)).unflatten(0, [B, N])
+        masked_location = torch.arange(N).repeat([B, 1]) > step[:, None]
+        x_config[masked_location] = self.padding_token
         x = x_config
         token_location = (torch.arange(N).repeat([B, 1]) == step[:, None])
         # x_feat = self.feat_branch(heatmaps.flatten(0, 1)[:, None]).unflatten(0, [B, N])
@@ -108,15 +109,15 @@ class CamControl(nn.Module):
         # query_feat = self.feat_branch(world_heatmap)
         # x[token_location] = torch.cat([self.state_token[step], query_feat], dim=-1)
         x[token_location] = self.state_token[step]
-        x = F.layer_norm(x, [x.shape[-1]])  # + self.positional_embedding.to(heatmaps.device)
+        x = F.layer_norm(x, [x.shape[-1]])  # + self.positional_embedding.to(x.device)
         # CHECK: batch_first=True for transformer
         x = self.transformer(x)
         x = x[token_location]
 
         # output head
         action_mean = self.actor_mean(x)
-        action_std = F.softplus(self.actor_std(x) + np.log(np.exp(self.actstd_init) - 1))
-        if not self.training and deterministic:
+        action_std = F.softplus(torch.clamp(self.actor_std(x) + np.log(np.exp(self.actstd_init) - 1), -5, None))
+        if deterministic:
             # remove randomness during evaluation when deterministic=True
             return action_mean, self.critic(x), None, None
         probs = Normal(action_mean, action_std)
@@ -129,10 +130,12 @@ class CamControl(nn.Module):
 
 
 if __name__ == '__main__':
+    import json
     import tqdm
     from torchvision.models import vit_b_16
     from torchvision.models import vgg16, alexnet
     from src.utils.tensor_utils import dist_action, dist_l2, dist_angle, expectation, tanh_prime
+    from src.environment.carla_gym_seq import encode_camera_cfg
 
 
     class Object(object):
@@ -153,16 +156,31 @@ if __name__ == '__main__':
     yaw2 = torch.tensor([0, 15, 30, 60, 90, 150, 180, -120, -60, -180]) / 180
     dist_rot = dist_angle(yaw1[:, None], yaw2[None])
 
-    dist_action(torch.randn([7, 1, 5]), torch.randn([1, 10, 5]), dataset.action_names)
+    with open('../../cfg/RL/1.cfg', "r") as fp:
+        opts = json.load(fp)
+    pos, dir = np.array(opts['cam_pos_lst']), np.array(opts['cam_dir_lst'])
+    cam_configs_ = np.concatenate([pos, dir, np.ones([4, 1]) * opts['cam_fov']], axis=1)
+    cam_configs = torch.tensor(np.array([encode_camera_cfg(cam_configs_[cam], opts) for cam in range(4)]))
+
+    dist_action(cam_configs[None], cam_configs[:, None], dataset.action_names)
 
     model = CamControl(dataset, C, )
+    # state_dict = torch.load(
+    #     '../../logs/carlax/RL_1_6dof+fix_moda_E_lr0.0001_stdtanhinit0.5wait10_ent0.001_regdecay0.1e10_cover0.0_divsteps1.0mu0.0_dir0.0_det_TASK_max_e30_2023-10-02_22-51-37/model.pth')
+    # state_dict = {key.replace('control_module.', ''): value for key, value in state_dict.items() if
+    #               'control_module' in key}
+    # model.load_state_dict(state_dict)
     # model.eval()
-
-    state = (torch.randn([B, N, H, W]),
-             torch.randn([B, N, dataset.config_dim]),
-             torch.randn([B, 1, H, W]),
-             torch.randint(0, N, [B]))
-    action, value, probs, x_feat = model.get_action_and_value(state)
+    heatmaps, configs, world_heatmap, step = (torch.randn([B, N, H, W]),
+                                              torch.randn([B, N, dataset.config_dim]),
+                                              torch.randn([B, 1, H, W]),
+                                              torch.randint(0, N, [B]))
+    masked_location = torch.arange(N).repeat([B, 1]) > step[:, None]
+    heatmaps[masked_location] = -1
+    configs[masked_location] = -3
+    state = heatmaps, configs, world_heatmap, step
+    action, value_, probs_, x_feat_ = model.get_action_and_value(state)
+    action, value, probs, x_feat = model.get_action_and_value(state, action)
     # covermap, heatmap = model.feat_decoder(x_feat)
 
     # mu, sigma = torch.zeros([B, dataset.config_dim]), \

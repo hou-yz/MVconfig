@@ -7,7 +7,6 @@ import torchvision.transforms as T
 from kornia.geometry import warp_perspective
 from src.models.resnet import resnet18
 from src.models.shufflenetv2 import shufflenet_v2_x0_5
-from src.models.mvcontrol import CamControl
 from src.models.multiview_base import MultiviewBase, cover_mean, cover_mean_std, aggregate_feat
 from src.utils.image_utils import img_color_denormalize, array2heatmap
 from src.utils.projection import get_worldcoord_from_imgcoord_mat, project_2d_points
@@ -32,7 +31,7 @@ def output_head(in_dim, feat_dim, out_dim):
 
 class MVDet(MultiviewBase):
     def __init__(self, dataset, arch='resnet18', aggregation='max',
-                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0, control_arch='conv', actstd_init=1.0):
+                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0):
         super().__init__(dataset, aggregation)
         self.Rimg_shape, self.Rworld_shape = np.array(dataset.Rimg_shape), np.array(dataset.Rworld_shape)
         self.img_reduce = dataset.img_reduce
@@ -65,11 +64,6 @@ class MVDet(MultiviewBase):
         self.world_feat = nn.Sequential(nn.Conv2d(self.base_dim, hidden_dim, 3, padding=1), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=2, dilation=2), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
-
-        if dataset.interactive:
-            self.control_module = CamControl(dataset, self.base_dim, control_arch, actstd_init)
-        else:
-            self.control_module = None
 
         # world heads
         self.world_heatmap = output_head(hidden_dim, outfeat_dim, 1)
