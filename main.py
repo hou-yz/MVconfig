@@ -65,6 +65,13 @@ def main(args):
         base = CarlaX(dataset_config, port=args.carla_port, tm_port=args.carla_tm_port)
         args.num_workers = 0
         args.batch_size = 1
+
+        if args.interactive:
+            args.lr *= 0.1
+            if not args.joint_training:
+                args.base_lr_ratio = args.other_lr_ratio = 0
+        args.div_xy_coef *= (dataset_config['camera_range'][1] - dataset_config['camera_range'][0]) / \
+                            (dataset_config['spawn_area'][1] - dataset_config['spawn_area'][0])
     else:
         if args.dataset == 'wildtrack':
             base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
@@ -97,7 +104,8 @@ def main(args):
                              pin_memory=True, worker_init_fn=seed_worker)
 
     # logging
-    RL_settings = f'RL_{args.carla_cfg}fix_{args.reward}_{"NO_PPO_" if not args.use_ppo else ""}' \
+    RL_settings = f'RL_{args.carla_cfg}fix_{args.reward}_{"J_" if args.joint_training else ""}' \
+                  f'{"NO_PPO_" if not args.use_ppo else ""}' \
                   f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
                   f'stdwait{args.std_wait_epochs}ratio{args.std_lr_ratio}_ent{args.ent_coef}_' \
                   f'regdecay{args.reg_decay_factor}e{args.reg_decay_epochs}_' \
@@ -159,6 +167,15 @@ def main(args):
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
 
+    param_dicts = [{"params": [p for n, p in model.named_parameters()
+                               if 'base' not in n and p.requires_grad],
+                    "lr": args.lr * args.other_lr_ratio, },
+                   {"params": [p for n, p in model.named_parameters()
+                               if 'base' in n and p.requires_grad],
+                    "lr": args.lr * args.base_lr_ratio, },
+                   ]
+    optimizer_model = optim.Adam(param_dicts, args.lr, weight_decay=args.weight_decay)
+
     if args.interactive:
         param_dicts = [{"params": [p for n, p in control_module.named_parameters()
                                    if 'std' not in n and p.requires_grad],
@@ -167,15 +184,9 @@ def main(args):
                                    if 'std' in n and p.requires_grad],
                         "lr": args.control_lr * args.std_lr_ratio, },
                        ]
+        optimizer_agent = optim.Adam(param_dicts, args.control_lr, weight_decay=args.weight_decay)
     else:
-        param_dicts = [{"params": [p for n, p in model.named_parameters()
-                                   if 'base' not in n and p.requires_grad],
-                        "lr": args.lr * args.other_lr_ratio, },
-                       {"params": [p for n, p in model.named_parameters()
-                                   if 'base' in n and p.requires_grad],
-                        "lr": args.lr * args.base_lr_ratio, },
-                       ]
-    optimizer = optim.Adam(param_dicts, weight_decay=args.weight_decay)
+        optimizer_agent = None
 
     def warmup_lr_scheduler(epoch, warmup_epochs=0.1 * args.epochs):
         if epoch < warmup_epochs:
@@ -184,8 +195,9 @@ def main(args):
             # return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
             return 1 - (epoch - warmup_epochs) / (args.epochs - warmup_epochs)
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler) if not args.interactive \
-        else None  # torch.optim.lr_scheduler.StepLR(optimizer, step_size=20)
+    scheduler_model = torch.optim.lr_scheduler.LambdaLR(optimizer_model, warmup_lr_scheduler) if not args.interactive \
+        else None
+    scheduler_agent = None
 
     trainer = PerspectiveTrainer(model, control_module, logdir, writer, args)
 
@@ -202,7 +214,8 @@ def main(args):
             trainer.test(test_loader)
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
-            train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler)
+            train_loss, train_prec = trainer.train(epoch, train_loader, (optimizer_model, optimizer_agent),
+                                                   (scheduler_model, scheduler_agent))
             print('Testing...')
             test_loss, test_prec = trainer.test(test_loader)
 
@@ -216,7 +229,7 @@ def main(args):
                        train_prec_s, test_prec_s)
             if args.interactive:
                 torch.save(control_module.state_dict(), os.path.join(logdir, 'control_module.pth'))
-            else:
+            if not args.interactive or args.joint_training:
                 torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
 
     print('Test loaded model...')
@@ -255,6 +268,7 @@ if __name__ == '__main__':
     parser.add_argument('--deterministic', type=str2bool, default=False)
     # MVcontrol settings
     parser.add_argument('--interactive', action='store_true')
+    parser.add_argument('--joint_training', type=str2bool, default=False)
     parser.add_argument('--carla_cfg', type=str, default='1')
     # parser.add_argument('--control_arch', default='transformer', choices=['conv', 'transformer'])
     parser.add_argument('--rl_deterministic', type=str2bool, default=True)
@@ -305,7 +319,7 @@ if __name__ == '__main__':
                         help="coefficient of mean action diversity")
     parser.add_argument("--div_clamp", type=float, default=2.0,
                         help="clamp range of chosen action diversity")
-    parser.add_argument("--div_xy_coef", type=float, default=1.5)
+    parser.add_argument("--div_xy_coef", type=float, default=1.0)
     parser.add_argument("--div_yaw_coef", type=float, default=0.5)
     parser.add_argument("--dir_coef", type=float, default=0.3,
                         help="coefficient of delta camera direction (compared to the location)")

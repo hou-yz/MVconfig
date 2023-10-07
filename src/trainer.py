@@ -4,6 +4,7 @@ import random
 import time
 import copy
 import os
+import contextlib
 import numpy as np
 import torch
 from torch import nn
@@ -57,8 +58,6 @@ class PerspectiveTrainer(object):
 
     # https://github.com/vwxyzjn/ppo-implementation-details
     def expand_episode(self, dataset, init_obs, training=False, visualize=False, batch_idx=0):
-        self.model.eval()
-        self.agent.eval()
         step, configs, _, _, _ = init_obs
         B, N, _ = configs.shape
         assert B == 1, 'currently only support batch size of 1 for the envs'
@@ -106,17 +105,18 @@ class PerspectiveTrainer(object):
                                              self.unit_world_grids.cuda(),
                                              check_visible=True)[1].view([1, H, W])
             cam = step - 1
-            with torch.no_grad():
+            with contextlib.nullcontext():  # torch.no_grad() if not next_done else
                 feat, _ = self.model.get_feat(img[None, :].cuda(), aug_mat[None, :], proj_mat[None, :])
                 feat *= visible_mask
                 model_feat[:, cam] = feat
                 world_heatmap, world_offset = self.model.get_output(model_feat[:, :step])
                 cam_heatmap = self.model.get_world_heatmap(feat.flatten(0, 1))[:, 0].unflatten(0, [B, -1])
-            world_heatmaps.append(world_heatmap.cpu())
-            world_offsets.append(world_offset.cpu())
-            cam_covermap = feat.norm(dim=2) != 0
-            cam_heatmap = torch.sigmoid(cam_heatmap) * cam_covermap + HEATMAP_PAD_VALUE * ~cam_covermap
-            world_heatmap = torch.sigmoid(world_heatmap)
+            # return them to train MVDet
+            world_heatmaps.append(world_heatmap)
+            world_offsets.append(world_offset)
+            cam_covermap = feat.norm(dim=2).detach() != 0
+            cam_heatmap = torch.sigmoid(cam_heatmap.detach()) * cam_covermap + HEATMAP_PAD_VALUE * ~cam_covermap
+            world_heatmap = torch.sigmoid(world_heatmap.detach())
             obs_heatmaps[:, cam] = cam_heatmap
             obs_covermaps[:, cam] = cam_covermap
 
@@ -129,7 +129,7 @@ class PerspectiveTrainer(object):
             fig = plt.figure(figsize=tuple(np.array(dataset.Rworld_shape)[::-1] / 50))
             ax = fig.add_axes([0, 0, 1, 1])
             ax.axis('off')
-            ax.imshow(avg_covermap + torch.sigmoid(world_heatmaps[-1])[0, 0].detach().cpu(), vmin=0, vmax=2)
+            ax.imshow(avg_covermap + torch.sigmoid(world_heatmaps[-1].detach().cpu())[0, 0], vmin=0, vmax=2)
             ax.scatter(pedestrian_gt_ij[1], pedestrian_gt_ij[0], 4, 'orange', alpha=0.7)
             # https://stackoverflow.com/a/7821917/8305276
             # If we haven't already shown or saved the plot, then we need to
@@ -149,7 +149,7 @@ class PerspectiveTrainer(object):
             if visualize:
                 Image.fromarray(cover_visualize()).save(f'{self.logdir}/cover_{batch_idx}.png')
                 save_image(make_grid(torch.cat(imgs), normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
-            return model_feat.cpu(), (world_heatmaps[-1], world_offsets[-1])
+            return model_feat.cpu(), (world_heatmaps[-1].detach().cpu(), world_offsets[-1].detach().cpu())
 
         rewards, stats = self.rl_rewards(
             dataset, action_history, model_feat[0].cpu(), (world_heatmaps, world_offsets), world_gt, frame)
@@ -192,7 +192,7 @@ class PerspectiveTrainer(object):
                 # self.writer.add_image("images/imgs", make_grid(torch.cat(imgs), normalize=True),
                 #                       self.rl_global_step, dataformats='CHW')
 
-        return
+        return model_feat, (world_heatmaps[-1], world_offsets[-1])
 
     def expand_mean_actions(self, dataset, ):
         configs = torch.ones([1, dataset.num_cam, dataset.config_dim]).cuda() * CONFIGS_PADDING_VALUE
@@ -223,7 +223,7 @@ class PerspectiveTrainer(object):
         task_losses = torch.zeros([N + 1])
         modas = torch.zeros([N + 1])
         for cam in range(N):
-            world_heatmap, world_offset = world_res[0][cam], world_res[1][cam]
+            world_heatmap, world_offset = world_res[0][cam].detach().cpu(), world_res[1][cam].detach().cpu()
             # loss
             task_losses[cam + 1] = focal_loss(world_heatmap, world_gt['heatmap'][None, :])
             # MODA
@@ -529,46 +529,59 @@ class PerspectiveTrainer(object):
 
         del b_cam_heatmap, b_configs, b_step, b_actions, b_logprobs, b_advantages, b_returns, b_values
 
-    def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=100):
+    def train(self, epoch, dataloader, optimizers, schedulers=(), log_interval=100):
         losses = 0
         t0 = time.time()
         for batch_idx, (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) in enumerate(dataloader):
             B, N = configs.shape[:2]
-            if self.args.interactive:
-                self.expand_episode(dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
-                                    True, visualize=self.rl_global_step % 500 == 0)
-                if len(self.memory_bank['obs']) >= self.args.ppo_steps:  # or batch_idx + 1 == len(dataloader)
-                    self.train_rl(dataloader.dataset, optimizer, epoch)
+            if self.args.other_lr_ratio == 0:
+                self.model.eval()
+                self.model.base.train()
             else:
                 self.model.train()
-                if self.args.base_lr_ratio == 0:
-                    self.model.base.eval()
-                for key in imgs_gt.keys():
-                    imgs_gt[key] = imgs_gt[key].flatten(0, 1)
+            if self.args.base_lr_ratio == 0:
+                self.model.base.eval()
+            self.agent.eval()
+            for key in imgs_gt.keys():
+                imgs_gt[key] = imgs_gt[key].flatten(0, 1)
+            if self.args.interactive:
+                feat, (world_heatmap, world_offset) = self.expand_episode(
+                    dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
+                    True, visualize=self.rl_global_step % 500 == 0)
+            else:
                 (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = \
                     self.model(imgs.cuda(), aug_mats, proj_mats)
+            # MVDet loss
+            if self.args.use_mse:
+                w_loss = F.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device))
+            else:
                 loss_w_hm = focal_loss(world_heatmap, world_gt['heatmap'])
                 loss_w_off = regL1loss(world_offset, world_gt['reg_mask'], world_gt['idx'], world_gt['offset'])
                 # loss_w_id = self.ce_loss(world_id, world_gt['reg_mask'], world_gt['idx'], world_gt['pid'])
-                loss_img_hm = focal_loss(imgs_heatmap, imgs_gt['heatmap'])
-                loss_img_off = regL1loss(imgs_offset, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['offset'])
-                loss_img_wh = regL1loss(imgs_wh, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['wh'])
-                # loss_img_id = self.ce_loss(imgs_id, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['pid'])
-
                 w_loss = loss_w_hm + loss_w_off  # + self.args.id_ratio * loss_w_id
-                img_loss = loss_img_hm + loss_img_off + loss_img_wh * 0.1  # + self.args.id_ratio * loss_img_id
-                loss = w_loss + img_loss / N * self.args.alpha
+            if not self.args.interactive:
                 if self.args.use_mse:
-                    loss = F.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device)) + \
-                           self.args.alpha * F.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device)) / N
+                    img_loss = F.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
+                else:
+                    loss_img_hm = focal_loss(imgs_heatmap, imgs_gt['heatmap'])
+                    loss_img_off = regL1loss(imgs_offset, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['offset'])
+                    loss_img_wh = regL1loss(imgs_wh, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['wh'])
+                    # loss_img_id = self.ce_loss(imgs_id, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['pid'])
+                    img_loss = loss_img_hm + loss_img_off + loss_img_wh * 0.1  # + self.args.id_ratio * loss_img_id
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+            loss = w_loss + img_loss / N * self.args.alpha if not self.args.interactive else w_loss
+            losses += loss.item()
 
-                losses += loss.item()
+            # train MVDet
+            optimizers[0].zero_grad()
+            loss.backward()
+            optimizers[0].step()
 
-            if scheduler is not None:
+            # train MVcontrol
+            if len(self.memory_bank['obs']) >= self.args.ppo_steps:  # or batch_idx + 1 == len(dataloader)
+                self.train_rl(dataloader.dataset, optimizers[1], epoch)
+
+            for scheduler in schedulers:
                 if isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
                     scheduler.step()
                 elif isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingWarmRestarts) or \
@@ -581,11 +594,14 @@ class PerspectiveTrainer(object):
                 t_epoch = t1 - t0
                 print(f'Train epoch: {epoch}, batch:{(batch_idx + 1)}, '
                       f'loss: {losses / (batch_idx + 1):.3f}, time: {t_epoch:.1f}')
-        if isinstance(scheduler, torch.optim.lr_scheduler.StepLR):
-            scheduler.step()
+        for scheduler in schedulers:
+            if isinstance(scheduler, torch.optim.lr_scheduler.StepLR):
+                scheduler.step()
         return losses / len(dataloader), None
 
     def test(self, dataloader):
+        self.model.eval()
+        self.agent.eval()
         t0 = time.time()
         losses = 0
         cover_avg = 0
@@ -599,7 +615,6 @@ class PerspectiveTrainer(object):
                         dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
                         visualize=(batch_idx < 5), batch_idx=batch_idx)
                 else:
-                    self.model.eval()
                     feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
                     world_heatmap, world_offset = self.model.get_output(feat.cuda())
                 # coverage
