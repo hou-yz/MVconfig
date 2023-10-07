@@ -66,11 +66,11 @@ def encode_camera_cfg(cfg, opts):
     # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
     # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
     # fov \in [0, 180]
-    x_min, x_max, y_min, y_max, z_min, z_max = opts["camera_area"]
-    weight = torch.tensor([(x_max - x_min) / 2, (y_max - y_min) / 2, (z_max - z_min) / 2, 90, 180, 180, 90],
-                          device=device)
-    bias = torch.tensor([(x_max + x_min) / 2, (y_max + y_min) / 2, (z_max + z_min) / 2, 0, 0, 0, 90],
-                        device=device)
+    x_min, x_max, y_min, y_max, z_min, z_max, pitch_min, pitch_max, fov_min, fov_max = opts["camera_range"]
+    weight = torch.tensor([(x_max - x_min) / 2, (y_max - y_min) / 2, (z_max - z_min) / 2,
+                           (pitch_max - pitch_min) / 2, 180, 180, (fov_max - fov_min) / 2], device=device)
+    bias = torch.tensor([(x_max + x_min) / 2, (y_max + y_min) / 2, (z_max + z_min) / 2,
+                         (pitch_max + pitch_min) / 2, 0, 0, (fov_max + fov_min) / 2], device=device)
     _cfg = (cfg - bias) / weight
     return _cfg if is_tensor else _cfg.tolist()
 
@@ -83,11 +83,11 @@ def decode_camera_cfg(cfg, opts):
     # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
     # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
     # fov \in [0, 180]
-    x_min, x_max, y_min, y_max, z_min, z_max = opts["camera_area"]
-    weight = torch.tensor([(x_max - x_min) / 2, (y_max - y_min) / 2, (z_max - z_min) / 2, 90, 180, 180, 90],
-                          device=device)
-    bias = torch.tensor([(x_max + x_min) / 2, (y_max + y_min) / 2, (z_max + z_min) / 2, 0, 0, 0, 90],
-                        device=device)
+    x_min, x_max, y_min, y_max, z_min, z_max, pitch_min, pitch_max, fov_min, fov_max = opts["camera_range"]
+    weight = torch.tensor([(x_max - x_min) / 2, (y_max - y_min) / 2, (z_max - z_min) / 2,
+                           (pitch_max - pitch_min) / 2, 180, 180, (fov_max - fov_min) / 2], device=device)
+    bias = torch.tensor([(x_max + x_min) / 2, (y_max + y_min) / 2, (z_max + z_min) / 2,
+                         (pitch_max + pitch_min) / 2, 0, 0, (fov_max + fov_min) / 2], device=device)
     return cfg * weight + bias
 
 
