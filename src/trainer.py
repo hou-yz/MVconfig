@@ -541,10 +541,10 @@ class PerspectiveTrainer(object):
                 self.model.train()
             if self.args.base_lr_ratio == 0:
                 self.model.base.eval()
-            self.agent.eval()
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].flatten(0, 1)
             if self.args.interactive:
+                self.agent.eval()
                 feat, (world_heatmap, world_offset) = self.expand_episode(
                     dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
                     True, visualize=self.rl_global_step % 500 == 0)
@@ -601,7 +601,6 @@ class PerspectiveTrainer(object):
 
     def test(self, dataloader):
         self.model.eval()
-        self.agent.eval()
         t0 = time.time()
         losses = 0
         cover_avg = 0
@@ -610,6 +609,7 @@ class PerspectiveTrainer(object):
             B, N = configs.shape[:2]
             with torch.no_grad():
                 if self.args.interactive:
+                    self.agent.eval()
                     assert B == 1, 'only support batch_size/num_envs == 1'
                     feat, (world_heatmap, world_offset) = self.expand_episode(
                         dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
