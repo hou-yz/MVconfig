@@ -135,7 +135,6 @@ if __name__ == '__main__':
     from torchvision.models import vit_b_16
     from torchvision.models import vgg16, alexnet
     from src.utils.tensor_utils import dist_action, dist_l2, dist_angle, expectation, tanh_prime
-    from src.environment.carla_gym_seq import encode_camera_cfg
 
 
     class Object(object):
@@ -155,14 +154,6 @@ if __name__ == '__main__':
     yaw1 = torch.tensor([0, 30, 45, 60, 90, 120, 180]) / 180
     yaw2 = torch.tensor([0, 15, 30, 60, 90, 150, 180, -120, -60, -180]) / 180
     dist_rot = dist_angle(yaw1[:, None], yaw2[None])
-
-    with open('../../cfg/RL/1.cfg', "r") as fp:
-        opts = json.load(fp)
-    pos, dir = np.array(opts['cam_pos_lst']), np.array(opts['cam_dir_lst'])
-    cam_configs_ = np.concatenate([pos, dir, np.ones([4, 1]) * opts['cam_fov']], axis=1)
-    cam_configs = torch.tensor(np.array([encode_camera_cfg(cam_configs_[cam], opts) for cam in range(4)]))
-
-    dist_action(cam_configs[None], cam_configs[:, None], dataset.action_names)
 
     model = CamControl(dataset, C, )
     # state_dict = torch.load(

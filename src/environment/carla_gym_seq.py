@@ -11,6 +11,7 @@ import cv2
 import gym
 import numpy as np
 import torch
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from src.parameters import *
 from src.environment.cameras import build_cam
@@ -56,41 +57,6 @@ def run_carla(carla_path, off_screen=False, quality="Epic", gpu=2, port=2000):
     return game_proc
 
 
-def encode_camera_cfg(cfg, opts):
-    is_tensor = isinstance(cfg, torch.Tensor)
-    device = cfg.device if is_tensor else 'cpu'
-    cfg = torch.tensor(cfg, dtype=torch.float) if not is_tensor else cfg
-    # action is for a SINGLE camera
-    # convert cfg: location/rotation/fov from different ranges to [-1, 1]
-    # [x, y, z, pitch, yaw, roll, fov] = cfg
-    # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
-    # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
-    # fov \in [0, 180]
-    x_min, x_max, y_min, y_max, z_min, z_max, pitch_min, pitch_max, fov_min, fov_max = opts["camera_range"]
-    weight = torch.tensor([(x_max - x_min) / 2, (y_max - y_min) / 2, (z_max - z_min) / 2,
-                           (pitch_max - pitch_min) / 2, 180, 180, (fov_max - fov_min) / 2], device=device)
-    bias = torch.tensor([(x_max + x_min) / 2, (y_max + y_min) / 2, (z_max + z_min) / 2,
-                         (pitch_max + pitch_min) / 2, 0, 0, (fov_max + fov_min) / 2], device=device)
-    _cfg = (cfg - bias) / weight
-    return _cfg if is_tensor else _cfg.tolist()
-
-
-def decode_camera_cfg(cfg, opts):
-    device = cfg.device if isinstance(cfg, torch.Tensor) else 'cpu'
-    # action is for a SINGLE camera
-    # convert cfg: location/rotation/fov from [-1, 1] to different ranges
-    # [x, y, z, pitch, yaw, roll, fov] = cfg
-    # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
-    # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
-    # fov \in [0, 180]
-    x_min, x_max, y_min, y_max, z_min, z_max, pitch_min, pitch_max, fov_min, fov_max = opts["camera_range"]
-    weight = torch.tensor([(x_max - x_min) / 2, (y_max - y_min) / 2, (z_max - z_min) / 2,
-                           (pitch_max - pitch_min) / 2, 180, 180, (fov_max - fov_min) / 2], device=device)
-    bias = torch.tensor([(x_max + x_min) / 2, (y_max + y_min) / 2, (z_max + z_min) / 2,
-                         (pitch_max + pitch_min) / 2, 0, 0, (fov_max + fov_min) / 2], device=device)
-    return cfg * weight + bias
-
-
 def draw_bbox(obs, info):
     imgs = obs["images"]
     gts = info["pedestrian_gts"]
@@ -123,7 +89,7 @@ class CarlaCameraSeqEnv(gym.Env):
     The CARLA environment for single-camera multi-frame pedestrian detection
     """
 
-    def __init__(self, opts, host="127.0.0.1", port=2000, tm_port=8000):
+    def __init__(self, opts, host="127.0.0.1", port=2000, tm_port=8000, euler2vec='none'):
         self.opts = opts
 
         # default seed
@@ -150,11 +116,30 @@ class CarlaCameraSeqEnv(gym.Env):
         # step = num_cam: done = True
         self.step_counter = 0
 
-        self.config_dim = 7
-        self.action_names = self.opts["env_action_space"].split("-")
-        config_id_dict = {'x': 0, 'y': 1, 'z': 2, 'pitch': 3, 'yaw': 4, 'roll': 5, 'fov': 6}
-        action_ids = [config_id_dict[key] for key in self.action_names]
-        self.action_mapping = torch.arange(self.config_dim)[:, None] == torch.tensor(action_ids)[None]
+        self.action_names = self.opts['env_action_space']  # might be in [x,y,z,dir_x,dir_y,dir_z,roll,fov]
+        self.decoded_action_names = self.opts['env_action_space'].split('-')  # [x,y,z,yaw,pitch,roll,fov] = cfg
+        config_dict = {'x': 0, 'y': 1, 'z': 2, 'yaw': 3, 'pitch': 4, 'roll': 5, 'fov': 6}
+        action_ids = [config_dict[key] for key in self.decoded_action_names]
+        self.use_default = (torch.arange(len(config_dict))[:, None] == torch.tensor(action_ids)[None]).sum(dim=1).bool()
+        self.euler2vec = [angle for angle in euler2vec.split('-') if angle in self.decoded_action_names]
+        if 'yaw' in self.euler2vec:
+            self.action_names = self.action_names.replace('yaw', 'dir_x-dir_y')
+            if 'pitch' in self.euler2vec:
+                self.action_names = self.action_names.replace('pitch', 'dir_z')
+                config_dict = {'x': 0, 'y': 1, 'z': 2, 'dir_x': 3, 'dir_y': 4, 'dir_z': 5, 'roll': 6, 'fov': 7}
+            else:
+                config_dict = {'x': 0, 'y': 1, 'z': 2, 'dir_x': 3, 'dir_y': 4, 'pitch': 5, 'roll': 6, 'fov': 7}
+        else:
+            assert len(self.euler2vec) == 0  # if converted, then must include yaw
+        self.config_dim = len(config_dict)
+        self.action_names = self.action_names.split('-')
+        action_ids = [config_dict[key] for key in self.action_names]
+        self.action2config = torch.arange(len(config_dict))[:, None] == torch.tensor(action_ids)[None]
+        x_min, x_max, y_min, y_max, z_min, z_max, pitch_min, pitch_max, fov_min, fov_max = opts["camera_range"]
+        self.cfg_weight = torch.tensor([(x_max - x_min) / 2, (y_max - y_min) / 2, (z_max - z_min) / 2,
+                                        180, (pitch_max - pitch_min) / 2, 180, (fov_max - fov_min) / 2])
+        self.cfg_bias = torch.tensor([(x_max + x_min) / 2, (y_max + y_min) / 2, (z_max + z_min) / 2,
+                                      0, (pitch_max + pitch_min) / 2, 0, (fov_max + fov_min) / 2])
 
         # Define any other attributes or variables needed for your environment
         # turn on sync mode
@@ -185,6 +170,60 @@ class CarlaCameraSeqEnv(gym.Env):
         self.pedestrian_bps = self.world.get_blueprint_library().filter("walker.pedestrian.*")
         self.walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
 
+    # action is for a SINGLE camera
+    # convert cfg: location/rotation/fov from [-1, 1] to different ranges
+    # [x, y, z, yaw, pitch, roll, fov] = cfg
+    # x, y, z \in [x_min, x_max], [y_min, y_max], [z_min, z_max]
+    # pitch, yaw, roll \in [-90, 90], [-180, 180], [-180, 180]
+    # fov \in [0, 180]
+    # dir_x = torch.cos(yaw) * torch.cos(pitch)
+    # dir_y = torch.sin(yaw) * torch.cos(pitch)
+    # dir_z = torch.sin(pitch)
+    # vec = vec.norm(dim=-1)
+    # pitch = torch.arcsin(vec[..., 2])
+    # yaw = torch.atan2(vec[..., 1], vec[..., 0])
+    def encode_camera_cfg(self, cfg):
+        is_tensor = isinstance(cfg, torch.Tensor)
+        device = cfg.device if is_tensor else 'cpu'
+        cfg = torch.tensor(cfg, dtype=torch.float) if not is_tensor else cfg  # \in opts["camera_range"]
+        _cfg = (cfg - self.cfg_bias.to(device)) / self.cfg_weight.to(device)  # \in [-1,1]
+        if 'yaw' in self.euler2vec:
+            [x, y, z, yaw, pitch, roll, fov] = _cfg
+            _yaw = torch.deg2rad(yaw * self.cfg_weight[3].to(device) + self.cfg_bias[3].to(device))
+            _pitch = torch.deg2rad(pitch * self.cfg_weight[4].to(device) + self.cfg_bias[4].to(device))
+            if 'pitch' in self.euler2vec:
+                dir_x = torch.cos(_yaw) * torch.cos(_pitch)
+                dir_y = torch.sin(_yaw) * torch.cos(_pitch)
+                dir_z = torch.sin(_pitch)
+                action = [x, y, z, dir_x, dir_y, dir_z, roll, fov]
+            else:
+                dir_x = torch.cos(_yaw)
+                dir_y = torch.sin(_yaw)
+                action = [x, y, z, dir_x, dir_y, pitch, roll, fov]
+            action = torch.stack(action, dim=-1)  # one more dimension
+        else:
+            action = _cfg
+        return action if is_tensor else action.tolist()
+
+    def decode_camera_cfg(self, action):
+        device = action.device if isinstance(action, torch.Tensor) else 'cpu'
+        if 'yaw' in self.euler2vec:
+            if 'pitch' in self.euler2vec:
+                [x, y, z, dir_x, dir_y, dir_z, roll, fov] = action
+                vec = F.normalize(torch.stack([dir_x, dir_y, dir_z], dim=-1), dim=-1)
+                pitch = torch.rad2deg(torch.arcsin(vec[..., 2]))
+                yaw = torch.rad2deg(torch.atan2(vec[..., 1], vec[..., 0]))
+                pitch = (pitch - self.cfg_bias[4].to(device)) / self.cfg_weight[4].to(device)
+            else:
+                [x, y, z, dir_x, dir_y, pitch, roll, fov] = action
+                vec = F.normalize(torch.stack([dir_x, dir_y], dim=-1), dim=-1)
+                yaw = torch.rad2deg(torch.atan2(vec[..., 1], vec[..., 0]))
+            yaw = (yaw - self.cfg_bias[3].to(device)) / self.cfg_weight[3].to(device)
+            _cfg = torch.tensor([x, y, z, yaw, pitch, roll, fov], device=device)  # one more dimension
+        else:
+            _cfg = action
+        return _cfg * self.cfg_weight.to(device) + self.cfg_bias.to(device)
+
     def action(self, act, cam):
         device = act.device if isinstance(act, torch.Tensor) else 'cpu'
         # camera config for the next camera
@@ -192,16 +231,15 @@ class CarlaCameraSeqEnv(gym.Env):
         # convert normalised action space to unnormalised ones
         if not isinstance(act, torch.Tensor):
             act = torch.tensor(act, dtype=torch.float, device=device)
-        _action = self.action_mapping.to(device).float() @ act
+        _action = self.action2config.to(device).float() @ act
         _action = torch.clamp(_action, -1, 1)
-        _cfg = decode_camera_cfg(_action, self.opts)
+        cfg = self.decode_camera_cfg(_action)
         # default settings for limited action space
         location, rotation, fov = torch.tensor(self.opts["cam_pos_lst"], device=device)[cam], \
             torch.tensor(self.opts["cam_dir_lst"], device=device)[cam], \
             torch.tensor(self.opts["cam_fov"], device=device).reshape([-1])
         default_cfg = torch.cat([location, rotation, fov])
-        use_default = self.action_mapping.sum(dim=1).bool().to(device)
-        cfg = _cfg * use_default + default_cfg * ~use_default
+        cfg = cfg * self.use_default.to(device) + default_cfg * ~self.use_default.to(device)
         return cfg
 
     def reset(self, seed=None, motion=False):
@@ -221,7 +259,7 @@ class CarlaCameraSeqEnv(gym.Env):
         # NOTE: render all cameras by default
         observation = {
             "images": self.render(),
-            "camera_configs": {cam: encode_camera_cfg(self.camera_configs[cam], self.opts)
+            "camera_configs": {cam: self.encode_camera_cfg(self.camera_configs[cam])
                                for cam in range(self.num_cam)},
             "step": self.step_counter
         }
@@ -238,12 +276,13 @@ class CarlaCameraSeqEnv(gym.Env):
         # Perform one step in the environment based on the given action
         # have seen self.step_counter cameras
         cam = self.step_counter
-        action = self.action(action, cam).numpy().tolist()
+        cfg = self.action(action, cam).numpy().tolist()
         # the input action would be an array of 7 numbers, as defined in action space
         # values are in the range of 0-1
-        loc = carla.Location(*action[:3])
-        rot = carla.Rotation(*action[3:6])
-        fov = action[6]
+        loc = carla.Location(*cfg[:3])
+        # cam_dir=[yaw, pitch, roll], carla.Rotation([pitch, yaw, roll])
+        rot = carla.Rotation(*cfg[[4, 3, 5]])
+        fov = cfg[6]
         new_transform = carla.Transform(loc, rot)
         if float(self.cameras[cam].attributes["fov"]) != fov:
             # change camera fov, first destroy the old camera
@@ -271,7 +310,7 @@ class CarlaCameraSeqEnv(gym.Env):
         # Set the current observation
         observation = {
             "images": self.render(),
-            "camera_configs": {cam: encode_camera_cfg(self.camera_configs[cam], self.opts)
+            "camera_configs": {cam: self.encode_camera_cfg(self.camera_configs[cam])
                                for cam in range(self.num_cam)},
             "step": self.step_counter
         }
@@ -533,7 +572,8 @@ class CarlaCameraSeqEnv(gym.Env):
             if float(fov) != float(self.camera_bp.get_attribute("fov")):
                 self.camera_bp.set_attribute("fov", str(fov))
             loc = carla.Location(*cam_pos)
-            rot = carla.Rotation(*cam_dir)
+            # cam_dir=[yaw, pitch, roll], carla.Rotation([pitch, yaw, roll])
+            rot = carla.Rotation(*cam_dir[[1, 0, 2]])
             camera_init_trans = carla.Transform(loc, rot)
             # spawn the camera
             self.cameras[cam] = self.world.spawn_actor(self.camera_bp, camera_init_trans)
@@ -596,34 +636,32 @@ if __name__ == '__main__':
 
     container = docker_run_carla(1)
 
-    with open('../../cfg/RL/1_6dof.cfg', "r") as fp:
+    with open('cfg/RL/town05market.cfg', "r") as fp:
         dataset_config = json.load(fp)
-    dataset_config['motion'] = True
-    dataset_config['n_chatgroup'] = 4
+    # dataset_config['motion'] = True
+    # dataset_config['n_chatgroup'] = 4
     transform = T.Compose([T.ToTensor(), T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)), ])
 
-    env = CarlaCameraSeqEnv(dataset_config, port=2100, tm_port=8100)
+    env = CarlaCameraSeqEnv(dataset_config, port=2000, tm_port=8000, euler2vec='yaw-pitch')
     done = False
-    for i in tqdm(range(400 * 100)):
-        observation, info = env.reset(motion=True)
-        print(observation['step'])
+    for i in tqdm(range(4)):
+        _observation, info = env.reset(motion=True)
+        print(_observation['step'])
         j = 0
         while not done:
-            # observation, reward, done, info = env.step(np.random.rand(7))
-            x, y, z = dataset_config['cam_pos_lst'][j]
-            pitch, yaw, roll = dataset_config['cam_dir_lst'][j]
-            fov = dataset_config['cam_fov']
-            cfg = [x, y, z, pitch, yaw, roll, fov]
-            observation, reward, done, info = env.step(encode_camera_cfg(cfg, dataset_config))
+            action = env.action2config.float().T @ torch.tensor(_observation['camera_configs'][j])
+            observation, reward, done, info = env.step(action)
             print(observation['step'])
             j += 1
         done = False
 
     # in loop listen
-    env.reset()
-    t0 = time.time()
-    for i in tqdm(range(400)):
-        for j in range(NUM_TICKS):
-            env.world.tick()
-        env.render()
-    print(f'in-loop listen time: {time.time() - t0}')
+    # env.reset()
+    # t0 = time.time()
+    # for i in tqdm(range(400)):
+    #     for j in range(NUM_TICKS):
+    #         env.world.tick()
+    #     env.render()
+    # print(f'in-loop listen time: {time.time() - t0}')
+
+    container.stop()
