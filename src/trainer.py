@@ -16,7 +16,6 @@ from PIL import Image
 from src.parameters import *
 from src.loss import *
 from src.evaluation.evaluate import evaluate, evaluateDetection_py
-from src.environment.carla_gym_seq import encode_camera_cfg
 from src.environment.cameras import action2proj_mat
 from src.utils.decode import ctdet_decode, mvdet_decode
 from src.utils.nms import nms
@@ -24,6 +23,31 @@ from src.utils.meters import AverageMeter
 from src.utils.projection import project_2d_points
 from src.utils.image_utils import add_heatmap_to_image, img_color_denormalize
 from src.utils.tensor_utils import expectation, tanh_prime, dist_action, dist_l2
+
+
+# visualize
+def cover_visualize(dataset, model_feat, world_heatmap, world_gt):
+    avg_covermap = model_feat[0].norm(dim=1).bool().float().mean([0]).cpu()
+    pedestrian_gt_ij = torch.where(world_gt['heatmap'][0] == 1)
+    H, W = world_gt['heatmap'].shape[-2:]
+    pedestrian_gt_ij = (world_gt['idx'][world_gt['reg_mask']] // W, world_gt['idx'][world_gt['reg_mask']] % W)
+    fig = plt.figure(figsize=tuple(np.array(dataset.Rworld_shape)[::-1] / 50))
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.axis('off')
+    ax.imshow(avg_covermap + torch.sigmoid(world_heatmap[0, 0].detach().cpu()), vmin=0, vmax=2)
+    ax.scatter(pedestrian_gt_ij[1], pedestrian_gt_ij[0], 4, 'orange', alpha=0.7)
+    # https://stackoverflow.com/a/7821917/8305276
+    # If we haven't already shown or saved the plot, then we need to
+    # draw the figure first...
+    fig.canvas.draw()
+
+    # Now we can save it to a numpy array.
+    data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    plt.close()
+    plt.cla()
+    plt.clf()
+    return data
 
 
 class PerspectiveTrainer(object):
@@ -120,34 +144,11 @@ class PerspectiveTrainer(object):
             obs_heatmaps[:, cam] = cam_heatmap
             obs_covermaps[:, cam] = cam_covermap
 
-        # visualize
-        def cover_visualize():
-            avg_covermap = model_feat[0].norm(dim=1).bool().float().mean([0]).cpu()
-            pedestrian_gt_ij = torch.where(world_gt['heatmap'][0] == 1)
-            H, W = world_gt['heatmap'].shape[-2:]
-            pedestrian_gt_ij = (world_gt['idx'][world_gt['reg_mask']] // W, world_gt['idx'][world_gt['reg_mask']] % W)
-            fig = plt.figure(figsize=tuple(np.array(dataset.Rworld_shape)[::-1] / 50))
-            ax = fig.add_axes([0, 0, 1, 1])
-            ax.axis('off')
-            ax.imshow(avg_covermap + torch.sigmoid(world_heatmaps[-1].detach().cpu())[0, 0], vmin=0, vmax=2)
-            ax.scatter(pedestrian_gt_ij[1], pedestrian_gt_ij[0], 4, 'orange', alpha=0.7)
-            # https://stackoverflow.com/a/7821917/8305276
-            # If we haven't already shown or saved the plot, then we need to
-            # draw the figure first...
-            fig.canvas.draw()
-
-            # Now we can save it to a numpy array.
-            data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-            data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-            plt.close()
-            plt.cla()
-            plt.clf()
-            return data
-
         # step N (step range is 0 ~ N-1 so this is after done=True): calculate rewards
         if not training:
             if visualize:
-                Image.fromarray(cover_visualize()).save(f'{self.logdir}/cover_{batch_idx}.png')
+                Image.fromarray(cover_visualize(dataset, model_feat, world_heatmaps[-1], world_gt)
+                                ).save(f'{self.logdir}/cover_{batch_idx}.png')
                 save_image(make_grid(torch.cat(imgs), normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
             return model_feat.cpu(), (world_heatmaps[-1].detach().cpu(), world_offsets[-1].detach().cpu())
 
@@ -188,7 +189,9 @@ class PerspectiveTrainer(object):
             self.writer.add_scalar("charts/loss", task_loss, self.rl_global_step)
             self.writer.add_scalar("charts/moda", modas[-1].item(), self.rl_global_step)
             if visualize:
-                self.writer.add_image("images/coverage", cover_visualize(), self.rl_global_step, dataformats='HWC')
+                self.writer.add_image("images/coverage",
+                                      cover_visualize(dataset, model_feat, world_heatmaps[-1], world_gt),
+                                      self.rl_global_step, dataformats='HWC')
                 # self.writer.add_image("images/imgs", make_grid(torch.cat(imgs), normalize=True),
                 #                       self.rl_global_step, dataformats='CHW')
 
@@ -202,7 +205,7 @@ class PerspectiveTrainer(object):
             action, _, _, _ = self.agent.get_action_and_value((None, configs, None, torch.tensor([cam])),
                                                               deterministic=True)
             token_location = (torch.arange(dataset.num_cam).repeat([1, 1]) == cam).cuda()
-            new_config = encode_camera_cfg(dataset.base.env.action(action[0].detach(), cam), dataset.base.env.opts)
+            new_config = dataset.base.env.encode_camera_cfg(dataset.base.env.action(action[0].detach(), cam))
             configs = new_config * token_location[..., None] + configs * ~token_location[..., None]
             action_means.append(action)
         return torch.cat(action_means)
@@ -617,6 +620,10 @@ class PerspectiveTrainer(object):
                 else:
                     feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
                     world_heatmap, world_offset = self.model.get_output(feat.cuda())
+                    if batch_idx < 5:
+                        Image.fromarray(cover_visualize(dataloader.dataset, feat, world_heatmap, world_gt)
+                                        ).save(f'{self.logdir}/cover_{batch_idx}.png')
+                        save_image(make_grid(imgs, normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
                 # coverage
                 cam_coverages = feat.norm(dim=2).bool().float()
                 overall_coverages = cam_coverages.max(dim=1)[0].mean().item()
