@@ -31,7 +31,7 @@ def output_head(in_dim, feat_dim, out_dim):
 
 class MVDet(MultiviewBase):
     def __init__(self, dataset, arch='resnet18', aggregation='max',
-                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0):
+                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0, dropout=0.1):
         super().__init__(dataset, aggregation)
         self.Rimg_shape, self.Rworld_shape = np.array(dataset.Rimg_shape), np.array(dataset.Rworld_shape)
         self.img_reduce = dataset.img_reduce
@@ -61,7 +61,9 @@ class MVDet(MultiviewBase):
         # self.img_id = output_head(base_dim, outfeat_dim, len(dataset.pid_dict))
 
         # world feat
-        self.world_feat = nn.Sequential(nn.Conv2d(self.base_dim, hidden_dim, 3, padding=1), nn.ReLU(),
+        # https://discuss.pytorch.org/t/what-is-the-difference-between-nn-dropout2d-and-nn-dropout/108192/2
+        self.world_feat = nn.Sequential(nn.Dropout2d(dropout),
+                                        nn.Conv2d(self.base_dim, hidden_dim, 3, padding=1), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=2, dilation=2), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
 
