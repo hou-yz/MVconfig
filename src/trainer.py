@@ -27,14 +27,15 @@ from src.utils.tensor_utils import expectation, tanh_prime, dist_action, dist_l2
 
 # visualize
 def cover_visualize(dataset, model_feat, world_heatmap, world_gt):
-    avg_covermap = model_feat[0].norm(dim=1).bool().float().mean([0]).cpu()
+    N, C, H, W = model_feat.shape
+    avg_covermap = model_feat.norm(dim=1).bool().float().mean([0]).cpu()
     pedestrian_gt_ij = torch.where(world_gt['heatmap'][0] == 1)
-    H, W = world_gt['heatmap'].shape[-2:]
-    pedestrian_gt_ij = (world_gt['idx'][world_gt['reg_mask']] // W, world_gt['idx'][world_gt['reg_mask']] % W)
+    pedestrian_gt_ij = (world_gt['idx'][world_gt['reg_mask']] // W,
+                        world_gt['idx'][world_gt['reg_mask']] % W)
     fig = plt.figure(figsize=tuple(np.array(dataset.Rworld_shape)[::-1] / 50))
     ax = fig.add_axes([0, 0, 1, 1])
     ax.axis('off')
-    ax.imshow(avg_covermap + torch.sigmoid(world_heatmap[0, 0].detach().cpu()), vmin=0, vmax=2)
+    ax.imshow(avg_covermap + torch.sigmoid(world_heatmap[0].detach().cpu()), vmin=0, vmax=2)
     ax.scatter(pedestrian_gt_ij[1], pedestrian_gt_ij[0], 4, 'orange', alpha=0.7)
     # https://stackoverflow.com/a/7821917/8305276
     # If we haven't already shown or saved the plot, then we need to
@@ -147,7 +148,7 @@ class PerspectiveTrainer(object):
         # step N (step range is 0 ~ N-1 so this is after done=True): calculate rewards
         if not training:
             if visualize:
-                Image.fromarray(cover_visualize(dataset, model_feat, world_heatmaps[-1], world_gt)
+                Image.fromarray(cover_visualize(dataset, model_feat[0], world_heatmaps[-1][0], world_gt)
                                 ).save(f'{self.logdir}/cover_{batch_idx}.png')
                 save_image(make_grid(torch.cat(imgs), normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
             return model_feat.cpu(), (world_heatmaps[-1].detach().cpu(), world_offsets[-1].detach().cpu())
@@ -190,7 +191,7 @@ class PerspectiveTrainer(object):
             self.writer.add_scalar("charts/moda", modas[-1].item(), self.rl_global_step)
             if visualize:
                 self.writer.add_image("images/coverage",
-                                      cover_visualize(dataset, model_feat, world_heatmaps[-1], world_gt),
+                                      cover_visualize(dataset, model_feat[0], world_heatmaps[-1][0], world_gt),
                                       self.rl_global_step, dataformats='HWC')
                 # self.writer.add_image("images/imgs", make_grid(torch.cat(imgs), normalize=True),
                 #                       self.rl_global_step, dataformats='CHW')
@@ -621,9 +622,10 @@ class PerspectiveTrainer(object):
                     feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
                     world_heatmap, world_offset = self.model.get_output(feat.cuda())
                     if batch_idx < 5:
-                        Image.fromarray(cover_visualize(dataloader.dataset, feat, world_heatmap, world_gt)
+                        Image.fromarray(cover_visualize(dataloader.dataset, feat[0], world_heatmap[0],
+                                                        {key: value[0] for key, value in world_gt.items()})
                                         ).save(f'{self.logdir}/cover_{batch_idx}.png')
-                        save_image(make_grid(imgs, normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
+                        save_image(make_grid(imgs[0], normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
                 # coverage
                 cam_coverages = feat.norm(dim=2).bool().float()
                 overall_coverages = cam_coverages.max(dim=1)[0].mean().item()
