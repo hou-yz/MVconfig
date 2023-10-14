@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def dist_action(act1, act2, action_names, xy_coef=1.0, yaw_coef=1.0, return_xys=False):
@@ -21,7 +22,7 @@ def dist_action(act1, act2, action_names, xy_coef=1.0, yaw_coef=1.0, return_xys=
         dist_ = dist_ + dist_rot_ * yaw_coef if dist_ is not None else dist_rot_ * yaw_coef
     elif 'dir_x' in action_names and 'dir_y' in action_names:
         idx = [action_names.index('dir_x'), action_names.index('dir_y')]
-        delta_xy1, delta_xy2 = act1[..., idx], act2[..., idx]
+        delta_xy1, delta_xy2 = F.normalize(act1[..., idx], dim=-1), F.normalize(act2[..., idx], dim=-1)
         dist_rot_ = dist_l2(delta_xy1, delta_xy2)
         dist_ = dist_ + dist_rot_ * yaw_coef if dist_ is not None else dist_rot_ * yaw_coef
     else:

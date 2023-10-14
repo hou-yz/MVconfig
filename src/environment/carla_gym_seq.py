@@ -35,6 +35,7 @@ def docker_run_carla(gpu=0, carla_port=2000):
     while container.status == "created":
         container.reload()
         time.sleep(2)
+    time.sleep(15)
     return container
 
 
@@ -281,7 +282,7 @@ class CarlaCameraSeqEnv(gym.Env):
         # values are in the range of 0-1
         loc = carla.Location(*cfg[:3])
         # cam_dir=[yaw, pitch, roll], carla.Rotation([pitch, yaw, roll])
-        rot = carla.Rotation(*cfg[[4, 3, 5]])
+        rot = carla.Rotation(cfg[4], cfg[3], cfg[5])
         fov = cfg[6]
         new_transform = carla.Transform(loc, rot)
         if float(self.cameras[cam].attributes["fov"]) != fov:
