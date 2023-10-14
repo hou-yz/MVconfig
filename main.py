@@ -1,6 +1,6 @@
 import os
 
-os.environ['OMP_NUM_THREADS'] = '1'
+# os.environ['OMP_NUM_THREADS'] = '1'
 import time
 import itertools
 import json
@@ -27,6 +27,8 @@ from src.trainer import PerspectiveTrainer
 
 
 def main(args):
+    torch.set_num_threads(1)
+
     # check if in debug mode
     gettrace = getattr(sys, 'gettrace', None)
     if gettrace():
@@ -54,25 +56,26 @@ def main(args):
         torch.backends.cudnn.benchmark = True
 
     # increase process niceness
-    os.nice(10)
+    # os.nice(10)
 
     # dataset
     if args.dataset == 'carlax':
         carla_container = docker_run_carla(args.carla_gpu, args.carla_port)
-        time.sleep(10)
         with open(f'./cfg/RL/{args.carla_cfg}.cfg', "r") as fp:
             dataset_config = json.load(fp)
-        base = CarlaX(dataset_config, port=args.carla_port, tm_port=args.carla_tm_port)
+        base = CarlaX(dataset_config, port=args.carla_port, tm_port=args.carla_tm_port, euler2vec=args.euler2vec)
         args.num_workers = 0
         args.batch_size = 1
 
         if args.interactive:
+            args.augmentation = ''
             args.lr *= 0.1
             if not args.joint_training:
                 args.base_lr_ratio = args.other_lr_ratio = 0
         args.div_xy_coef *= (dataset_config['camera_range'][1] - dataset_config['camera_range'][0]) / \
                             (dataset_config['spawn_area'][1] - dataset_config['spawn_area'][0])
     else:
+        # args.augmentation += '+color'
         if args.dataset == 'wildtrack':
             base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
         elif args.dataset == 'multiviewx':
@@ -82,15 +85,11 @@ def main(args):
         args.batch_size = 1 if args.batch_size is None else args.batch_size
         args.interactive = False
 
-    train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
-                             img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                             img_kernel_size=args.img_kernel_size, interactive=args.interactive,
-                             augmentation=args.augmentation and not args.interactive,
-                             seed=None if args.interactive else args.carla_seed,  # random in interactive carla training
-                             )
-    test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
-                            img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                            img_kernel_size=args.img_kernel_size,
+    train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce, img_reduce=args.img_reduce,
+                             world_kernel_size=args.world_kernel_size, img_kernel_size=args.img_kernel_size,
+                             interactive=args.interactive, augmentation=args.augmentation, seed=args.carla_seed)
+    test_set = frameDataset(base, split='test', world_reduce=args.world_reduce, img_reduce=args.img_reduce,
+                            world_kernel_size=args.world_kernel_size, img_kernel_size=args.img_kernel_size,
                             interactive=args.interactive, seed=args.carla_seed)
 
     def seed_worker(worker_id):
@@ -104,18 +103,20 @@ def main(args):
                              pin_memory=True, worker_init_fn=seed_worker)
 
     # logging
-    RL_settings = f'RL_{args.carla_cfg}fix_{args.reward}_{"J_" if args.joint_training else ""}' \
+    RL_settings = f'RL_fix_{args.reward}_{"J_" if args.joint_training else ""}' \
                   f'{"NO_PPO_" if not args.use_ppo else ""}' \
                   f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
                   f'stdwait{args.std_wait_epochs}ratio{args.std_lr_ratio}_ent{args.ent_coef}_' \
                   f'regdecay{args.reg_decay_factor}e{args.reg_decay_epochs}_' \
                   f'cover{args.cover_coef}_divsteps{args.steps_div_coef}mu{args.mu_div_coef}_dir{args.dir_coef}_' \
                   f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
-    logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{RL_settings}' \
+    logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}' \
+             f'{f"{args.carla_cfg}_{RL_settings}" if args.dataset == "carlax" else ""}' \
              f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
-        else f'logs/{args.dataset}/EVAL_{args.resume}'
+        else f'logs/{args.dataset}/EVAL_{f"{args.carla_cfg}" if args.dataset == "carlax" else ""}{args.resume}'
     os.makedirs(logdir, exist_ok=True)
     copy_tree('src', logdir + '/scripts/src')
+    copy_tree('src', logdir + '/scripts/cfg')
     for script in os.listdir('.'):
         if script.split('.')[-1] == 'py':
             dst_file = os.path.join(logdir, 'scripts', os.path.basename(script))
@@ -129,36 +130,13 @@ def main(args):
     model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim).cuda()
 
     # load checkpoint
-    if args.interactive:
-        with open(f'logs/{args.dataset}/{args.arch}_.txt', 'r') as fp:
-            load_dir = fp.read()
-        print(load_dir)
-        pretrained_dict = torch.load(f'{load_dir}/model.pth')
-        model_dict = model.state_dict()
-        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'control' not in k}
-        model_dict.update(pretrained_dict)
-        model.load_state_dict(model_dict)
-        if not is_debug:
-            # tensorboard logging
-            writer = SummaryWriter(logdir)
-            writer.add_text("hyperparameters",
-                            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
-                                                                     for key, value in vars(args).items()])))
-        else:
-            writer = None
-
-        control_module = CamControl(train_set, model.base_dim, args.actstd_init).cuda()
-    else:
-        if not args.eval:
-            with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}.txt', 'w') as fp:
-                fp.write(logdir)
-        writer = None
-        control_module = None
-
-    if args.resume:
-        load_dir = f'logs/{args.dataset}/{args.resume}'
+    control_module = None
+    writer = None
+    if args.interactive or args.resume or args.eval:
+        load_dir = f'logs/{args.dataset}/{args.resume}' if args.resume else None
         if not os.path.exists(f'{load_dir}/model.pth'):
-            with open(f'logs/{args.dataset}/{args.arch}_.txt', 'r') as fp:
+            # with open(f'logs/multiviewx/{args.arch}_None.txt', 'r') as fp:
+            with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}.txt', 'r') as fp:
                 load_dir = fp.read()
         print(f'loading checkpoint: {load_dir}')
         pretrained_dict = torch.load(f'{load_dir}/model.pth')
@@ -166,6 +144,14 @@ def main(args):
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
+        if args.interactive:
+            control_module = CamControl(train_set, model.base_dim, args.actstd_init).cuda()
+            if not is_debug:
+                # tensorboard logging
+                writer = SummaryWriter(logdir)
+                writer.add_text("hyperparameters",
+                                "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
+                                                                         for key, value in vars(args).items()])))
 
     param_dicts = [{"params": [p for n, p in model.named_parameters()
                                if 'base' not in n and p.requires_grad],
@@ -243,6 +229,9 @@ def main(args):
             time.sleep(2)
     if args.interactive and not is_debug:
         writer.close()
+    if not args.interactive and not args.eval:
+        with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}.txt', 'w') as fp:
+            fp.write(logdir)
 
 
 if __name__ == '__main__':
@@ -269,7 +258,7 @@ if __name__ == '__main__':
     # MVcontrol settings
     parser.add_argument('--interactive', action='store_true')
     parser.add_argument('--joint_training', type=str2bool, default=False)
-    parser.add_argument('--carla_cfg', type=str, default='1')
+    parser.add_argument('--carla_cfg', type=str, default=None)
     # parser.add_argument('--control_arch', default='transformer', choices=['conv', 'transformer'])
     parser.add_argument('--rl_deterministic', type=str2bool, default=True)
     parser.add_argument('--carla_port', type=int, default=2000)
@@ -277,6 +266,7 @@ if __name__ == '__main__':
     parser.add_argument('--carla_gpu', type=int, default=0)
     # RL arguments
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
+    parser.add_argument('--euler2vec', type=str, default='yaw')
     # https://arxiv.org/abs/2006.05990
     parser.add_argument('--actstd_init', type=float, default=0.5, help='initial value actor std')
     parser.add_argument("--reward", default='moda')
@@ -334,7 +324,7 @@ if __name__ == '__main__':
     parser.add_argument("--autoencoder_detach", type=str2bool, default=False)
     # multiview detection specific settings
     parser.add_argument('--reID', action='store_true')
-    parser.add_argument('--augmentation', type=str2bool, default=True)
+    parser.add_argument('--augmentation', type=str, default='affine')
     parser.add_argument('--id_ratio', type=float, default=0)
     parser.add_argument('--cls_thres', type=float, default=0.6)
     parser.add_argument('--alpha', type=float, default=0.0, help='ratio for per view loss')

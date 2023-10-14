@@ -70,7 +70,7 @@ def read_pom(root):
 class frameDataset(VisionDataset):
     def __init__(self, base, split='train', reID=False, world_reduce=4, img_reduce=12,
                  world_kernel_size=10, img_kernel_size=10,
-                 split_ratio=(0.8, 0.1, 0.1), top_k=100, force_download=True, augmentation=False,
+                 split_ratio=(0.8, 0.1, 0.1), top_k=100, force_download=True, augmentation='',
                  interactive=False, seed=None):
         super().__init__(base.root)
 
@@ -82,9 +82,16 @@ class frameDataset(VisionDataset):
         self.world_reduce, self.img_reduce = world_reduce, img_reduce
         self.img_shape, self.worldgrid_shape = base.img_shape, base.worldgrid_shape  # H,W; N_row,N_col
         self.world_kernel_size, self.img_kernel_size = world_kernel_size, img_kernel_size
-        self.transform = T.Compose([T.ToTensor(), T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-                                    T.Resize((np.array(self.img_shape) * 8 // self.img_reduce).tolist())])
         self.augmentation = augmentation
+        self.transform = T.Compose([T.ToPILImage(),
+                                    T.Resize((np.array(self.img_shape) * 8 // self.img_reduce).tolist(),
+                                             antialias=True),
+                                    T.ColorJitter(0.4, 0.4, 0.4),
+                                    T.ToTensor(),
+                                    T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+                                    ]) if 'color' in self.augmentation else \
+            T.Compose([T.ToTensor(), T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+                       T.Resize((np.array(self.img_shape) * 8 // self.img_reduce).tolist())])
         self.interactive = interactive
 
         self.Rworld_shape = list(map(lambda x: x // self.world_reduce, self.worldgrid_shape))
@@ -347,7 +354,7 @@ class frameDataset(VisionDataset):
             cam_img_bboxs, cam_img_pids = img_bboxs[cam], img_pids[cam]
             if len(cam_img_bboxs.shape) == 1:
                 cam_img_bboxs = cam_img_bboxs.reshape([-1, 4])
-            if self.augmentation:
+            if 'affine' in self.augmentation:
                 img, cam_img_bboxs, cam_img_pids, M = random_affine(img, cam_img_bboxs, cam_img_pids)
             else:
                 M = np.eye(3)
@@ -379,6 +386,7 @@ if __name__ == '__main__':
     from src.datasets.multiviewx import MultiviewX
     from src.datasets.carlax import CarlaX
     import random
+    import json
 
     seed = 1
     # random.seed(seed)
@@ -387,13 +395,12 @@ if __name__ == '__main__':
     # torch.cuda.manual_seed(seed)
     # torch.cuda.manual_seed_all(seed)
 
-    # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), force_download=True)
+    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), augmentation='affine+color')
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
-    import json
 
-    with open('../../cfg/RL/1.cfg', "r") as fp:
-        dataset_config = json.load(fp)
-    dataset = frameDataset(CarlaX(dataset_config, port=2100, tm_port=8100), interactive=True, seed=seed)
+    # with open('../../cfg/RL/1.cfg', "r") as fp:
+    #     dataset_config = json.load(fp)
+    # dataset = frameDataset(CarlaX(dataset_config, port=2100, tm_port=8100), interactive=True, seed=seed)
     # min_dist = np.inf
     # for world_gt in dataset.world_gt.values():
     #     x, y = world_gt[0][:, 0], world_gt[0][:, 1]
@@ -402,19 +409,19 @@ if __name__ == '__main__':
     #         np.fill_diagonal(xy_dists, np.inf)
     #         min_dist = min(min_dist, np.min(xy_dists))
     #         pass
-    # dataloader = DataLoader(dataset, 2, True, num_workers=0)
-    # t0 = time.time()
-    # # _ = next(iter(dataloader))
-    # for i in range(20):
-    #     _ = dataset.__getitem__(i % len(dataset), visualize=True)
-    #     if dataset.base.__name__ == 'CarlaX' and dataset.interactive:
-    #         done = False
-    #         while not done:
-    #             _, done = dataset.step(np.random.randn(2), visualize=True)
-    #
-    # print(time.time() - t0)
-    # pass
-    if True:
+    dataloader = DataLoader(dataset, 2, True, num_workers=0)
+    t0 = time.time()
+    _ = next(iter(dataloader))
+    for i in range(20):
+        _ = dataset.__getitem__(i % len(dataset), visualize=True)
+        if dataset.base.__name__ == 'CarlaX' and dataset.interactive:
+            done = False
+            while not done:
+                _, done = dataset.step(np.random.randn(2), visualize=True)
+
+    print(time.time() - t0)
+    pass
+    if False:
         dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train')
         import matplotlib.pyplot as plt
         from src.utils.projection import get_worldcoord_from_imagecoord
