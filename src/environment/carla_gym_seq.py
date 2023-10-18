@@ -171,6 +171,9 @@ class CarlaCameraSeqEnv(gym.Env):
         self.pedestrian_bps = self.world.get_blueprint_library().filter("walker.pedestrian.*")
         self.walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
 
+        # reset cameras only once
+        self.reset_cameras()
+
     # action is for a SINGLE camera
     # convert cfg: location/rotation/fov from [-1, 1] to different ranges
     # [x, y, z, yaw, pitch, roll, fov] = cfg
@@ -252,7 +255,6 @@ class CarlaCameraSeqEnv(gym.Env):
         # Reset the environment to its initial state and return the initial observation
         self.respawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
                                  motion=self.opts['motion'])
-        self.reset_cameras()
         self.step_counter = 0
 
         # time.sleep(SLEEP_TIME)
@@ -635,7 +637,7 @@ if __name__ == '__main__':
     from tqdm import tqdm
     import torchvision.transforms as T
 
-    container = docker_run_carla(1)
+    container = docker_run_carla(0)
 
     with open('cfg/RL/town05market.cfg', "r") as fp:
         dataset_config = json.load(fp)
@@ -645,16 +647,23 @@ if __name__ == '__main__':
 
     env = CarlaCameraSeqEnv(dataset_config, port=2000, tm_port=8000, euler2vec='yaw-pitch')
     done = False
-    for i in tqdm(range(4)):
+    t0 = time.time()
+    L = 30 * 400
+    for i in range(L):
         _observation, info = env.reset(motion=True)
-        print(_observation['step'])
+        # print(_observation['step'])
         j = 0
         while not done:
             action = env.action2config.float().T @ torch.tensor(_observation['camera_configs'][j])
             observation, reward, done, info = env.step(action)
-            print(observation['step'])
+            # print(observation['step'])
             j += 1
         done = False
+        if (i + 1) % 100 == 0:
+            delta_t = time.time() - t0
+            eta = int(delta_t / (i + 1) * (L - i))
+            print(f'{i + 1} episodes took {delta_t:.1f}s, avg speed {delta_t / (i + 1):.1f}s/iter, '
+                  f'eta {eta // 3600:02d}:{(eta % 3600) // 60:02d}:{eta % 60:02d}')
 
     # in loop listen
     # env.reset()
