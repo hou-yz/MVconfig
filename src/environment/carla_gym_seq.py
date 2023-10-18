@@ -257,7 +257,7 @@ class CarlaCameraSeqEnv(gym.Env):
                                  motion=self.opts['motion'])
         self.step_counter = 0
 
-        # time.sleep(SLEEP_TIME)
+        time.sleep(SLEEP_TIME)
 
         # NOTE: render all cameras by default
         observation = {
