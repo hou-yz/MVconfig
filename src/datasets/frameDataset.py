@@ -118,7 +118,7 @@ class frameDataset(VisionDataset):
         # gt in mot format for evaluation
         self.gt_fname = f'{self.root}/gt.txt'
         if self.base.__name__ == 'CarlaX':
-            self.z = 0
+            self.z = self.base.z
             # generate same pedestrian layout for the same frame
             if seed is not None:
                 # random_generator = random.Random(seed)
@@ -245,12 +245,13 @@ class frameDataset(VisionDataset):
             img_bboxs[cam], img_pids[cam] = np.array(img_bboxs[cam]), np.array(img_pids[cam])
         return np.array(world_pts), np.array(world_lwh), np.array(world_pids), img_bboxs, img_pids
 
-    def get_world_imgs_trans(self, intrinsic, extrinsic, z=0):
+    def get_world_imgs_trans(self, intrinsic, extrinsic):
         device = intrinsic.device if isinstance(intrinsic, torch.Tensor) else 'cpu'
         Rworldgrid_from_worldcoord = to_tensor(self.Rworldgrid_from_worldcoord, dtype=torch.float, device=device)
         # z in meters by default
         # projection matrices: img feat -> world feat
-        worldcoord_from_imgcoord = get_worldcoord_from_imgcoord_mat(intrinsic, extrinsic, z / self.base.worldcoord_unit)
+        worldcoord_from_imgcoord = get_worldcoord_from_imgcoord_mat(intrinsic, extrinsic,
+                                                                    self.z / self.base.worldcoord_unit)
         # worldgrid(xy)_from_img(xy)
         Rworldgrid_from_imgcoord = Rworldgrid_from_worldcoord @ worldcoord_from_imgcoord
         return Rworldgrid_from_imgcoord

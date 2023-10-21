@@ -20,6 +20,7 @@ class CarlaX(VisionDataset):
         # annotation accuracy of 2.5 cm, opts["map_expand"] = 40
         self.worldgrid_shape = [int((y_max - y_min) * opts["map_expand"]),
                                 int((x_max - x_min) * opts["map_expand"])]  # N_row,N_col
+        self.z = opts['ref_plane']
         self.num_cam, self.num_frame = opts["num_cam"], opts["num_frame"]
         # unit in meters
         self.worldcoord_unit = 1
