@@ -12,12 +12,11 @@ def project_2d_points(project_mat, input_points, check_visible=False):
     input_points = torch.cat([input_points, torch.ones([N, 1], device=device)], dim=1)
     output_points_ = project_mat @ input_points.T
     if check_visible:
-        is_visible = output_points_[2, :] > 0
-        output_points = (output_points_[:2, :] / (output_points_[2, :].abs() + 1e-6)) * is_visible + \
-                        torch.ones([2, N], device=device) * 1e6 * ~is_visible
-        return output_points.T, is_visible
+        is_visible = output_points_[..., [2], :] > 0
+        output_points = (output_points_[..., :2, :] / (output_points_[..., [2], :].abs() + 1e-6)) * is_visible + 1e6
+        return output_points.transpose(-1, -2), is_visible
     else:
-        return (output_points_[:2, :] / output_points_[2, :]).T
+        return (output_points_[..., :2, :] / output_points_[..., [2], :]).transpose(-1, -2)
 
 
 def get_worldcoord_from_imagecoord(image_coord, intrinsic_mat, extrinsic_mat, z=0):
@@ -35,8 +34,8 @@ def get_imgcoord_from_worldcoord_mat(intrinsic_mat, extrinsic_mat, z=0):
     world of shape N_row, N_col; xy indexing; z in meters by default
     """
     device = intrinsic_mat.device if isinstance(intrinsic_mat, torch.Tensor) else 'cpu'
-    intrinsic_mat, extrinsic_mat = to_tensor(intrinsic_mat), to_tensor(extrinsic_mat)
-    threeD2twoD = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, z], [0, 0, 1]], dtype=torch.float, device=device)
+    intrinsic_mat, extrinsic_mat = to_tensor(intrinsic_mat, torch.float64), to_tensor(extrinsic_mat, torch.float64)
+    threeD2twoD = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, z], [0, 0, 1]], dtype=torch.float64, device=device)
     project_mat = intrinsic_mat @ extrinsic_mat @ threeD2twoD
     return project_mat
 
@@ -45,5 +44,5 @@ def get_worldcoord_from_imgcoord_mat(intrinsic_mat, extrinsic_mat, z=0):
     """image of shape C,H,W; xy indexing; x,y (w,h)
     world of shape N_row, N_col; xy indexing; z in meters by default
     """
-    project_mat = torch.inverse(get_imgcoord_from_worldcoord_mat(intrinsic_mat, extrinsic_mat, z))
+    project_mat = torch.inverse(get_imgcoord_from_worldcoord_mat(intrinsic_mat, extrinsic_mat, z)).float()
     return project_mat
