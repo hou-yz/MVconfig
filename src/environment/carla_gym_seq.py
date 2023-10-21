@@ -6,6 +6,7 @@ import subprocess
 import time
 import math
 import docker
+from PIL import Image
 import carla
 import cv2
 import gym
@@ -173,6 +174,8 @@ class CarlaCameraSeqEnv(gym.Env):
 
         # reset cameras only once
         self.reset_cameras()
+        self.default_imgs = {cam: Image.fromarray(np.zeros([self.opts['cam_y'], self.opts['cam_x'], 3], dtype=np.uint8))
+                             for cam in range(self.num_cam)}
 
     # action is for a SINGLE camera
     # convert cfg: location/rotation/fov from [-1, 1] to different ranges
@@ -252,10 +255,37 @@ class CarlaCameraSeqEnv(gym.Env):
         self.random_generator = random.Random(seed)
         self.np_random_generator = np.random.default_rng(seed)
 
+        # Destroy existing actors, create new ones randomly
+        for pedestrian in self.pedestrians:
+            if 'controller' in pedestrian:
+                ai_controller = self.world.get_actor(pedestrian['controller'])
+                ai_controller.stop()
+                destroyed_successfully = ai_controller.destroy()
+            actor = self.world.get_actor(pedestrian['id'])
+            destroyed_successfully = actor.destroy()
+        self.pedestrians = []
+        self.step_counter = 0
+
+    def default_obs(self):
+        observation = {
+            "images": self.default_imgs,
+            # "images": self.render(),
+            "camera_configs": {cam: self.encode_camera_cfg(self.camera_configs[cam])
+                               for cam in range(self.num_cam)},
+            "step": self.step_counter
+        }
+        info = {"pedestrian_gts": [],
+                "camera_intrinsics": self.camera_intrinsics,
+                "camera_extrinsics": self.camera_extrinsics}  # Set any additional information
+
+        # NOTE: Remember that Python only returns a reference to these objects
+        # you may need to use copy.deepcopy() to avoid effects from further steps
+        return observation, info
+
+    def spawn_and_render(self):
         # Reset the environment to its initial state and return the initial observation
         self.respawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
                                  motion=self.opts['motion'])
-        self.step_counter = 0
 
         time.sleep(SLEEP_TIME)
 
@@ -312,9 +342,9 @@ class CarlaCameraSeqEnv(gym.Env):
         # Update the state, calculate the reward, and check for termination
         # Set the current observation
         observation = {
-            "images": self.render(),
-            "camera_configs": {cam: self.encode_camera_cfg(self.camera_configs[cam])
-                               for cam in range(self.num_cam)},
+            "images": self.render([cam, ]),  # only render one camera for speed
+            "camera_configs": {cam_: self.encode_camera_cfg(self.camera_configs[cam_])
+                               for cam_ in range(self.num_cam)},
             "step": self.step_counter
         }
         self.update_pedestrian_gts()
@@ -332,20 +362,21 @@ class CarlaCameraSeqEnv(gym.Env):
         # you may need to use copy.deepcopy() to avoid effects from further steps
         return observation, reward, done, info
 
-    def render(self):
+    def render(self, cams=None):
         # Render the environment
         images = {}
         # start listening the camera images
-        for cam, camera in self.cameras.items():
-            camera.listen(self.img_cam_buffer[cam].put)
+        if cams is None: cams = list(range(self.num_cam))
+        for cam in cams:
+            self.cameras[cam].listen(self.img_cam_buffer[cam].put)
         self.world.tick()
         # wait for sync until get all images
-        for cam, queue_buffer in self.img_cam_buffer.items():
-            image = queue_buffer.get()
+        for cam in cams:
+            image = self.img_cam_buffer[cam].get()
             images[cam] = process_img(image)
         # end listening
-        for camera in self.cameras.values():
-            camera.stop()
+        for cam in cams:
+            self.cameras[cam].stop()
         return images
 
     def close(self):
@@ -363,15 +394,6 @@ class CarlaCameraSeqEnv(gym.Env):
 
     def respawn_pedestrians(self, n_chatgroup=4, chatgroup_size=(2, 4), chatgroup_radius=(0.5, 1.5),
                             n_walk=15, n_roam=0, percentagePedestriansRunning=0.2, motion=False):
-        # Destroy existing actors, create new ones randomly
-        for pedestrian in self.pedestrians:
-            if 'controller' in pedestrian:
-                ai_controller = self.world.get_actor(pedestrian['controller'])
-                ai_controller.stop()
-                destroyed_successfully = ai_controller.destroy()
-            actor = self.world.get_actor(pedestrian['id'])
-            destroyed_successfully = actor.destroy()
-        self.pedestrians = []
         # spawn parameter, make the spawn area 0.5m smaller
         min_x, max_x = self.opts["spawn_area"][0:2]
         min_y, max_y = self.opts["spawn_area"][2:4]
@@ -637,7 +659,7 @@ if __name__ == '__main__':
     from tqdm import tqdm
     import torchvision.transforms as T
 
-    container = docker_run_carla(0)
+    # container = docker_run_carla(gpu=1, carla_port=2000)
 
     with open('cfg/RL/town05market.cfg', "r") as fp:
         dataset_config = json.load(fp)
@@ -650,7 +672,8 @@ if __name__ == '__main__':
     t0 = time.time()
     L = 30 * 400
     for i in range(L):
-        _observation, info = env.reset(motion=True)
+        env.reset(motion=True)
+        _observation, info = env.default_obs()
         # print(_observation['step'])
         j = 0
         while not done:
@@ -659,6 +682,7 @@ if __name__ == '__main__':
             # print(observation['step'])
             j += 1
         done = False
+        _observation, info = env.spawn_and_render()
         if (i + 1) % 100 == 0:
             delta_t = time.time() - t0
             eta = int(delta_t / (i + 1) * (L - i))
@@ -674,4 +698,4 @@ if __name__ == '__main__':
     #     env.render()
     # print(f'in-loop listen time: {time.time() - t0}')
 
-    container.stop()
+    # container.stop()
