@@ -65,9 +65,10 @@ def main(args):
             dataset_config = json.load(fp)
         base = CarlaX(dataset_config, port=args.carla_port, tm_port=args.carla_tm_port, euler2vec=args.euler2vec)
         args.num_workers = 0
-        args.batch_size = 1
+        args.batch_size = 1 if args.batch_size is None else args.batch_size
 
         if args.interactive:
+            args.batch_size = 1
             args.augmentation = ''
             args.lr *= 0.1
             if not args.joint_training:
@@ -116,7 +117,7 @@ def main(args):
         else f'logs/{args.dataset}/EVAL_{f"{args.carla_cfg}" if args.dataset == "carlax" else ""}{args.resume}'
     os.makedirs(logdir, exist_ok=True)
     copy_tree('src', logdir + '/scripts/src')
-    copy_tree('src', logdir + '/scripts/cfg')
+    copy_tree('cfg', logdir + '/scripts/cfg')
     for script in os.listdir('.'):
         if script.split('.')[-1] == 'py':
             dst_file = os.path.join(logdir, 'scripts', os.path.basename(script))
@@ -127,10 +128,11 @@ def main(args):
     print(vars(args))
 
     # model
-    model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim).cuda()
+    model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim,
+                  check_visible=args.dataset == 'carlax').cuda()
+    control_module = CamControl(train_set, args.hidden_dim, args.actstd_init).cuda() if args.interactive else None
 
     # load checkpoint
-    control_module = None
     writer = None
     if args.interactive or args.resume or args.eval:
         load_dir = f'logs/{args.dataset}/{args.resume}' if args.resume else None
@@ -145,7 +147,6 @@ def main(args):
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
         if args.interactive:
-            control_module = CamControl(train_set, model.base_dim, args.actstd_init).cuda()
             if not is_debug:
                 # tensorboard logging
                 writer = SummaryWriter(logdir)
@@ -179,7 +180,7 @@ def main(args):
             return epoch / warmup_epochs
         else:
             # return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
-            return 1 - (epoch - warmup_epochs) / (args.epochs - warmup_epochs)
+            return 1 - (epoch - warmup_epochs) / (args.epochs - warmup_epochs + 1e-8)
 
     scheduler_model = torch.optim.lr_scheduler.LambdaLR(optimizer_model, warmup_lr_scheduler) if not args.interactive \
         else None
@@ -272,9 +273,9 @@ if __name__ == '__main__':
     parser.add_argument("--reward", default='moda')
     # https://www.reddit.com/r/reinforcementlearning/comments/n09ns2/explain_why_ppo_fails_at_this_very_simple_task/
     # https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
-    parser.add_argument("--ppo_steps", type=int, default=512,
+    parser.add_argument("--ppo_steps", type=int, default=256,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
-    parser.add_argument("--rl_minibatch_size", type=int, default=64,
+    parser.add_argument("--rl_minibatch_size", type=int, default=32,
                         help="RL mini-batches, default: 64")
     parser.add_argument("--rl_update_epochs", type=int, default=5,
                         help="the K epochs to update the policy, default: 10")
@@ -303,7 +304,7 @@ if __name__ == '__main__':
     parser.add_argument("--std_lr_ratio", type=float, default=1.0)
     parser.add_argument("--reg_decay_epochs", type=int, default=10)
     parser.add_argument("--reg_decay_factor", type=float, default=1.0)
-    parser.add_argument("--steps_div_coef", type=float, default=0.3,
+    parser.add_argument("--steps_div_coef", type=float, default=0.1,
                         help="coefficient of chosen action diversity")
     parser.add_argument("--mu_div_coef", type=float, default=0.0,
                         help="coefficient of mean action diversity")
@@ -311,7 +312,7 @@ if __name__ == '__main__':
                         help="clamp range of chosen action diversity")
     parser.add_argument("--div_xy_coef", type=float, default=1.0)
     parser.add_argument("--div_yaw_coef", type=float, default=0.5)
-    parser.add_argument("--dir_coef", type=float, default=0.3,
+    parser.add_argument("--dir_coef", type=float, default=0.1,
                         help="coefficient of delta camera direction (compared to the location)")
     parser.add_argument("--cover_coef", type=float, default=0.0,
                         help="coefficient of the coverage")
