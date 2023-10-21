@@ -3,41 +3,53 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats as ss
 
+center = 0.5
 # define x and y values to use for CDF
 f, (ax1, ax2) = plt.subplots(1, 2)
 x = np.linspace(-5, 5, 1000)
-norm_cdf = ss.norm.cdf(x, loc=0, scale=2.0)
-norm_pdf = np.gradient(norm_cdf, np.tanh(x))
-ax1.plot(np.tanh(x), norm_cdf, label='x~N(0, 2.0)')
-ax2.plot(np.tanh(x), norm_pdf, label='x~N(0, 2.0)')
-# clip_cdf = copy.deepcopy(norm_cdf)
-# clip_cdf[x < -1] = 0
-# clip_cdf[x > 1] = 1
-# plt.plot(x, clip_cdf)
-norm_cdf = ss.norm.cdf(x, loc=0, scale=1.0)
-norm_pdf = np.gradient(norm_cdf, np.tanh(x))
-ax1.plot(np.tanh(x), norm_cdf, label='x~N(0, 1.0)')
-ax2.plot(np.tanh(x), norm_pdf, label='x~N(0, 1.0)')
-# clip_cdf = copy.deepcopy(norm_cdf)
-# clip_cdf[x < -1] = 0
-# clip_cdf[x > 1] = 1
-# plt.plot(x, clip_cdf)
-norm_cdf = ss.norm.cdf(x, loc=0, scale=0.5)
-norm_pdf = np.gradient(norm_cdf, np.tanh(x))
-ax1.plot(np.tanh(x), norm_cdf, label='x~N(0, 0.5)')
-ax2.plot(np.tanh(x), norm_pdf, label='x~N(0, 0.5)')
-# clip_cdf = copy.deepcopy(norm_cdf)
-# clip_cdf[x < -1] = 0
-# clip_cdf[x > 1] = 1
-# plt.plot(x, clip_cdf)
-norm_cdf = ss.norm.cdf(x, loc=0, scale=0.1)
-norm_pdf = np.gradient(norm_cdf, np.tanh(x))
-ax1.plot(np.tanh(x), norm_cdf, label='x~N(0, 0.1)')
-ax2.plot(np.tanh(x), norm_pdf, label='x~N(0, 0.1)')
-# clip_cdf = copy.deepcopy(norm_cdf)
-# clip_cdf[x < -1] = 0
-# clip_cdf[x > 1] = 1
-# plt.plot(x, clip_cdf)
+
+cdf = ss.norm.cdf(x, loc=center, scale=2.0)
+# cdf[x < -1] = 0
+# cdf[x > 1] = 1
+pdf = np.gradient(cdf, np.tanh(x))
+ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 2.0)')
+ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 2.0)')
+
+cdf = ss.norm.cdf(x, loc=center, scale=1.0)
+# cdf[x < -1] = 0
+# cdf[x > 1] = 1
+pdf = np.gradient(cdf, np.tanh(x))
+ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 1.0)')
+ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 1.0)')
+
+cdf = ss.norm.cdf(x, loc=center, scale=0.7)
+# cdf[x < -1] = 0
+# cdf[x > 1] = 1
+pdf = np.gradient(cdf, np.tanh(x))
+ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 0.7)')
+ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 0.7)')
+
+cdf = ss.norm.cdf(x, loc=center, scale=0.5)
+# cdf[x < -1] = 0
+# cdf[x > 1] = 1
+pdf = np.gradient(cdf, np.tanh(x))
+ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 0.5)')
+ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 0.5)')
+
+cdf = ss.norm.cdf(x, loc=center, scale=0.2)
+# cdf[x < -1] = 0
+# cdf[x > 1] = 1
+pdf = np.gradient(cdf, np.tanh(x))
+ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 0.2)')
+ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 0.2)')
+
+cdf = ss.norm.cdf(x, loc=center, scale=0.1)
+# cdf[x < -1] = 0
+# cdf[x > 1] = 1
+pdf = np.gradient(cdf, np.tanh(x))
+ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 0.1)')
+ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 0.1)')
+
 ax1.set_xlabel('u=tanh(x)')
 ax1.set_ylabel("CDF(u)")
 ax1.legend()
