@@ -9,6 +9,7 @@ from src.models.resnet import resnet18
 from src.models.shufflenetv2 import shufflenet_v2_x0_5
 from src.models.multiview_base import MultiviewBase, cover_mean, cover_mean_std, aggregate_feat
 from src.utils.image_utils import img_color_denormalize, array2heatmap
+from src.utils.tensor_utils import to_tensor
 from src.utils.projection import get_worldcoord_from_imgcoord_mat, project_2d_points
 import matplotlib.pyplot as plt
 
@@ -31,9 +32,10 @@ def output_head(in_dim, feat_dim, out_dim):
 
 class MVDet(MultiviewBase):
     def __init__(self, dataset, arch='resnet18', aggregation='max',
-                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0, dropout=0.1):
+                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0, dropout=0.1, check_visible=False):
         super().__init__(dataset, aggregation)
         self.Rimg_shape, self.Rworld_shape = np.array(dataset.Rimg_shape), np.array(dataset.Rworld_shape)
+        self.Rworldgrid_from_worldcoord = dataset.Rworldgrid_from_worldcoord
         self.img_reduce = dataset.img_reduce
 
         if arch == 'resnet18':
@@ -78,6 +80,12 @@ class MVDet(MultiviewBase):
         fill_fc_weights(self.img_wh)
         self.world_heatmap[-1].bias.data.fill_(-2.19)
         fill_fc_weights(self.world_offset)
+
+        # filter out visible locations
+        self.check_visible = check_visible
+        xx, yy = np.meshgrid(np.arange(0, self.Rworld_shape[1]), np.arange(0, self.Rworld_shape[0]))
+        self.unit_world_grids = torch.tensor(np.stack([xx, yy], axis=2), dtype=torch.float).flatten(0, 1)
+
         pass
 
     def get_feat(self, imgs, M, proj_mats, visualize=False):
@@ -89,20 +97,23 @@ class MVDet(MultiviewBase):
         imgcoord_from_Rimggrid_mat = inverse_aug_mats @ \
                                      torch.diag(torch.tensor([self.img_reduce, self.img_reduce, 1])
                                                 ).unsqueeze(0).repeat(B * N, 1, 1).float()
-        proj_mats = proj_mats[:, :N].flatten(0, 1) @ imgcoord_from_Rimggrid_mat
+        # [input arg] proj_mats is worldcoord_from_imgcoord
+        proj_mats = to_tensor(self.Rworldgrid_from_worldcoord)[None] @ \
+                    proj_mats[:, :N].flatten(0, 1) @ \
+                    imgcoord_from_Rimggrid_mat
 
-        # if visualize:
-        #     denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-        #     proj_imgs = warp_perspective(F.interpolate(imgs, scale_factor=1 / 8), proj_mats.to(imgs.device),
-        #                                  self.Rworld_shape).unflatten(0, [B, N])
-        #     for cam in range(N):
-        #         visualize_img = T.ToPILImage()(denorm(imgs.detach())[cam * B])
-        #         # visualize_img.save(f'../../imgs/augimg{cam + 1}.png')
-        #         plt.imshow(visualize_img)
-        #         plt.show()
-        #         visualize_img = T.ToPILImage()(denorm(proj_imgs.detach())[0, cam])
-        #         plt.imshow(visualize_img)
-        #         plt.show()
+        if visualize:
+            denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+            proj_imgs = warp_perspective(F.interpolate(imgs, scale_factor=1 / 8), proj_mats.to(imgs.device),
+                                         self.Rworld_shape).unflatten(0, [B, N])
+            for cam in range(N):
+                visualize_img = T.ToPILImage()(denorm(imgs.detach())[cam])
+                # visualize_img.save(f'../../imgs/augimg{cam + 1}.png')
+                plt.imshow(visualize_img)
+                plt.show()
+                visualize_img = T.ToPILImage()(denorm(proj_imgs.detach())[0, cam])
+                plt.imshow(visualize_img)
+                plt.show()
 
         imgs_feat = self.base(imgs)
         imgs_feat = self.bottleneck(imgs_feat)
@@ -114,20 +125,24 @@ class MVDet(MultiviewBase):
 
         # if visualize:
         #     for cam in range(N):
-        #         visualize_img = array2heatmap(torch.norm(imgs_feat[cam * B].detach(), dim=0).cpu())
+        #         visualize_img = array2heatmap(torch.norm(imgs_feat[cam].detach(), dim=0).cpu())
         #         # visualize_img.save(f'../../imgs/augimgfeat{cam + 1}.png')
         #         plt.imshow(visualize_img)
         #         plt.show()
 
         # world feat
         world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device), self.Rworld_shape).unflatten(0, [B, N])
-
-        if visualize:
-            for cam in range(N):
-                visualize_img = array2heatmap(torch.norm(world_feat[0, cam].detach(), dim=0).cpu())
-                # visualize_img.save(f'../../imgs/projfeat{cam + 1}.png')
-                plt.imshow(visualize_img)
-                plt.show()
+        if self.check_visible:
+            visible_mask = project_2d_points(torch.inverse(proj_mats).to(imgs.device),
+                                             self.unit_world_grids.to(imgs.device),
+                                             check_visible=True)[1].view([B, N, *self.Rworld_shape])
+            world_feat *= visible_mask[:, :, None]
+        # if visualize:
+        #     for cam in range(N):
+        #         visualize_img = array2heatmap(torch.norm(world_feat[0, cam].detach(), dim=0).cpu())
+        #         # visualize_img.save(f'../../imgs/projfeat{cam + 1}.png')
+        #         plt.imshow(visualize_img)
+        #         plt.show()
 
         return world_feat, (F.interpolate(imgs_heatmap, tuple(self.Rimg_shape)),
                             F.interpolate(imgs_offset, tuple(self.Rimg_shape)),
@@ -172,13 +187,13 @@ if __name__ == '__main__':
     from thop import profile
     import time
 
-    dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')))
+    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')))
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
 
     model = MVDet(dataset).cuda()
     (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) = next(iter(dataloader))
     model.train()
-    feat, _ = model.get_feat(imgs.cuda(), aug_mats, proj_mats, False)
+    feat, _ = model.get_feat(imgs.cuda(), aug_mats, proj_mats, True)
     feat_mean, feat_std = cover_mean_std(feat)
     t0 = time.time()
     for i in range(100):
