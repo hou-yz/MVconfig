@@ -104,11 +104,9 @@ def main(args):
                              pin_memory=True, worker_init_fn=seed_worker)
 
     # logging
-    RL_settings = f'RL_fix_{args.reward}_{"J_" if args.joint_training else ""}' \
-                  f'{"NO_PPO_" if not args.use_ppo else ""}' \
+    RL_settings = f'RL_fix_{args.reward}_{"J_" if args.joint_training else ""}{args.control_arch[0].upper()}_' \
                   f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
-                  f'stdwait{args.std_wait_epochs}ratio{args.std_lr_ratio}_ent{args.ent_coef}_' \
-                  f'regdecay{args.reg_decay_factor}e{args.reg_decay_epochs}_' \
+                  f'{args.action_clip}_ent{args.ent_coef}_' \
                   f'cover{args.cover_coef}_divsteps{args.steps_div_coef}mu{args.mu_div_coef}_dir{args.dir_coef}_' \
                   f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}' \
@@ -130,7 +128,8 @@ def main(args):
     # model
     model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim,
                   check_visible=args.dataset == 'carlax').cuda()
-    control_module = CamControl(train_set, args.hidden_dim, args.actstd_init).cuda() if args.interactive else None
+    control_module = CamControl(train_set, args.hidden_dim, args.actstd_init,
+                                args.control_arch).cuda() if args.interactive else None
 
     # load checkpoint
     writer = None
@@ -165,7 +164,7 @@ def main(args):
 
     if args.interactive:
         param_dicts = [{"params": [p for n, p in control_module.named_parameters()
-                                   if 'std' not in n and p.requires_grad],
+                                   if 'std' not in n and 'base' not in n and p.requires_grad],
                         "lr": args.control_lr, },
                        {"params": [p for n, p in control_module.named_parameters()
                                    if 'std' in n and p.requires_grad],
@@ -266,16 +265,18 @@ if __name__ == '__main__':
     parser.add_argument('--carla_tm_port', type=int, default=8000)
     parser.add_argument('--carla_gpu', type=int, default=0)
     # RL arguments
+    parser.add_argument('--control_arch', type=str, default='encoder')
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
     parser.add_argument('--euler2vec', type=str, default='yaw')
+    parser.add_argument("--action_clip", type=str, default='tanh', choices=['clip', 'tanh'])
     # https://arxiv.org/abs/2006.05990
     parser.add_argument('--actstd_init', type=float, default=0.5, help='initial value actor std')
     parser.add_argument("--reward", default='moda')
     # https://www.reddit.com/r/reinforcementlearning/comments/n09ns2/explain_why_ppo_fails_at_this_very_simple_task/
     # https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
-    parser.add_argument("--ppo_steps", type=int, default=256,
+    parser.add_argument("--ppo_steps", type=int, default=512,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
-    parser.add_argument("--rl_minibatch_size", type=int, default=32,
+    parser.add_argument("--rl_minibatch_size", type=int, default=64,
                         help="RL mini-batches, default: 64")
     parser.add_argument("--rl_update_epochs", type=int, default=5,
                         help="the K epochs to update the policy, default: 10")

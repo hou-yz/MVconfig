@@ -82,16 +82,22 @@ class PerspectiveTrainer(object):
         self.unit_world_grids = torch.tensor(np.stack([xx, yy], axis=2), dtype=torch.float).flatten(0, 1)
 
     def action_mapping(self, action):
-        # direction_idx = torch.tensor(['dir' in name for name in self.agent.action_names]).to(action.device)
-        # action[..., direction_idx] = F.normalize(action[..., direction_idx], dim=-1)
-        # action = torch.clamp(action, -1, 1)
-        action = torch.tanh(action)
+        if self.args.action_clip == 'clip':
+            direction_idx = torch.tensor(['dir' in name for name in self.agent.action_names]).to(action.device)
+            action = action / (action[..., direction_idx].norm(dim=-1, keepdim=True) * direction_idx +
+                               ~direction_idx + 1e-8)
+            action = torch.clamp(action, -1, 1)
+        elif self.args.action_clip == 'tanh':
+            action = torch.tanh(action)
+        else:
+            raise Exception
         return action
 
     # https://github.com/vwxyzjn/ppo-implementation-details
     def expand_episode(self, dataset, init_obs, training=False, visualize=False, batch_idx=0):
         step, configs, imgs, aug_mats, proj_mats = init_obs
         B, N, _ = configs.shape
+        imgs = F.interpolate(imgs.flatten(0, 1), scale_factor=1 / 10).unflatten(0, [B, N])
         assert B == 1, 'currently only support batch size of 1 for the envs'
         # step 0: initialization
         next_done = False
@@ -123,7 +129,8 @@ class PerspectiveTrainer(object):
                 self.memory_bank['dones'].append(next_done)
             cam = step - 1
             step = to_tensor(step, dtype=torch.long)[None]
-            configs[:, cam], imgs[:, cam], aug_mats[:, cam], proj_mats[:, cam] = config, img, aug_mat, proj_mat
+            configs[:, cam], aug_mats[:, cam], proj_mats[:, cam] = config, aug_mat, proj_mat
+            imgs[:, cam] = F.interpolate(img, scale_factor=1 / 10)
             action_history.append(action.cpu())
         # step N (step range is 0 ~ N-1 so this is after done=True): calculate rewards
         (step, configs, imgs, aug_mats, proj_mats, world_gt, img_gt, frame) = dataset.__getitem__()
@@ -400,7 +407,7 @@ class PerspectiveTrainer(object):
                 entropy_loss = (probs.entropy() +
                                 expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale],
                                             tanh_prime, device='cuda')
-                                ).sum(-1).mean()
+                                ).sum(-1).mean() if self.args.action_clip == 'tanh' else probs.entropy().sum(-1).mean()
 
                 # div loss
                 mb_action_history = b_actions[b_action_history_inds[mb_inds]].cuda()
@@ -412,6 +419,7 @@ class PerspectiveTrainer(object):
                                                                 self.args.div_xy_coef,
                                                                 self.args.div_yaw_coef, True)
                 steps_mask = torch.arange(N).repeat([B, 1]) < b_step[mb_inds, None]
+                # TODO: revert steps_div to min()
                 if steps_mask.any():
                     steps_div = torch.clamp(action_dist[steps_mask], 0, self.args.div_clamp).mean()
                 else:
