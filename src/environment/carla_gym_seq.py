@@ -212,7 +212,7 @@ class CarlaCameraSeqEnv(gym.Env):
             action = _cfg
         return action if is_tensor else action.tolist()
 
-    def decode_camera_cfg(self, action):
+    def decode_action(self, action):
         device = action.device if isinstance(action, torch.Tensor) else 'cpu'
         if 'yaw' in self.euler2vec:
             if 'pitch' in self.euler2vec:
@@ -238,9 +238,11 @@ class CarlaCameraSeqEnv(gym.Env):
         # convert normalised action space to unnormalised ones
         if not isinstance(act, torch.Tensor):
             act = torch.tensor(act, dtype=torch.float, device=device)
+        direction_idx = torch.tensor(['dir' in name for name in self.action_names]).to(device)
+        act[..., direction_idx] = F.normalize(act[..., direction_idx], dim=-1)
+        act = torch.clamp(act, -1, 1)
         _action = self.action2config.to(device).float() @ act
-        _action = torch.clamp(_action, -1, 1)
-        cfg = self.decode_camera_cfg(_action)
+        cfg = self.decode_action(_action)
         # default settings for limited action space
         location, rotation, fov = torch.tensor(self.opts["cam_pos_lst"], device=device)[cam], \
             torch.tensor(self.opts["cam_dir_lst"], device=device)[cam], \
@@ -260,9 +262,9 @@ class CarlaCameraSeqEnv(gym.Env):
             if 'controller' in pedestrian:
                 ai_controller = self.world.get_actor(pedestrian['controller'])
                 ai_controller.stop()
-                destroyed_successfully = ai_controller.destroy()
+                ai_controller.destroy()
             actor = self.world.get_actor(pedestrian['id'])
-            destroyed_successfully = actor.destroy()
+            actor.destroy()
         self.pedestrians = []
         self.step_counter = 0
 
@@ -386,9 +388,9 @@ class CarlaCameraSeqEnv(gym.Env):
             if 'controller' in pedestrian:
                 ai_controller = self.world.get_actor(pedestrian['controller'])
                 ai_controller.stop()
-                destroyed_successfully = ai_controller.destroy()
+                ai_controller.destroy()
             actor = self.world.get_actor(pedestrian['id'])
-            destroyed_successfully = actor.destroy()
+            actor.destroy()
         for camera in self.cameras.values():
             camera.destroy()
 

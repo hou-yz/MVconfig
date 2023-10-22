@@ -89,7 +89,7 @@ class frameDataset(VisionDataset):
                                     T.ColorJitter(0.4, 0.4, 0.4),
                                     T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
                                     ]) if 'color' in self.augmentation else \
-            T.Compose([T.ToTensor(), T.Resize(self.Rimg_shape),
+            T.Compose([T.ToTensor(), T.Resize(self.Rimg_shape, antialias=True),
                        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
         self.interactive = interactive
 
