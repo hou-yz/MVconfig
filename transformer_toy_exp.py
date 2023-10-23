@@ -9,7 +9,6 @@ from src.parameters import *
 from src.models.mvcontrol import create_pos_embedding
 
 
-
 class NumWordDataset(Dataset):
     def __init__(self, length, num_cam, config_dim):
         self.num_cam = num_cam
@@ -32,10 +31,12 @@ class Counter(nn.Module):
         self.config_branch = nn.Sequential(
             nn.Linear(config_dim * (1 if arch == 'transformer' else num_cam), hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim))
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim))
         if arch == 'transformer':
             # transformer
             self.positional_embedding = create_pos_embedding(num_cam, hidden_dim)
+            self.padding_token = nn.Parameter(torch.randn(hidden_dim))
             # CHECK: batch_first=True for transformer
             encoder_layer = nn.TransformerEncoderLayer(hidden_dim, 8, hidden_dim * 4, batch_first=True)
             self.transformer = nn.TransformerEncoder(encoder_layer, 3)
@@ -46,12 +47,14 @@ class Counter(nn.Module):
         B, N, C = configs.shape
         if self.arch == 'transformer':
             x = self.config_branch(configs.flatten(0, 1)).unflatten(0, [B, N])
+            padding_location = torch.arange(N).repeat([B, 1]) > step[:, None]
+            x[padding_location] = self.padding_token
             token_location = (torch.arange(N).repeat([B, 1]) == step[:, None])
             x[token_location] = self.state_token[step]
             # mask out future steps
             # mask = (torch.arange(N).repeat([B, 1]) > step[:, None])
             # x[mask] = 0
-            x = F.layer_norm(x, [x.shape[-1]])  # + self.positional_embedding
+            x = x + self.positional_embedding
             x = self.transformer(x)
             x = x[token_location]
         else:
