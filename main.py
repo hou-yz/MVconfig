@@ -274,9 +274,9 @@ if __name__ == '__main__':
     parser.add_argument("--reward", default='moda')
     # https://www.reddit.com/r/reinforcementlearning/comments/n09ns2/explain_why_ppo_fails_at_this_very_simple_task/
     # https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
-    parser.add_argument("--ppo_steps", type=int, default=512,
+    parser.add_argument("--ppo_steps", type=int, default=256,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
-    parser.add_argument("--rl_minibatch_size", type=int, default=64,
+    parser.add_argument("--rl_minibatch_size", type=int, default=32,
                         help="RL mini-batches, default: 64")
     parser.add_argument("--rl_update_epochs", type=int, default=5,
                         help="the K epochs to update the policy, default: 10")
@@ -302,8 +302,8 @@ if __name__ == '__main__':
     # additional loss/regularization
     parser.add_argument("--use_ppo", type=str2bool, default=True)
     parser.add_argument("--std_wait_epochs", type=int, default=0)
-    parser.add_argument("--std_lr_ratio", type=float, default=1.0)
-    parser.add_argument("--reg_decay_epochs", type=int, default=10)
+    parser.add_argument("--std_lr_ratio", type=float, default=10.0)
+    parser.add_argument("--reg_decay_epochs", type=int, default=100)
     parser.add_argument("--reg_decay_factor", type=float, default=1.0)
     parser.add_argument("--steps_div_coef", type=float, default=0.1,
                         help="coefficient of chosen action diversity")

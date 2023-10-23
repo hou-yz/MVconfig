@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical, Normal, Beta
 import torchvision.transforms as T
 from torchvision.models.efficientnet import efficientnet_b0
+from torchvision.utils import make_grid, save_image
 from src.models.multiview_base import aggregate_feat, cover_mean, cover_mean_std
 from src.utils.image_utils import img_color_denormalize, array2heatmap
 from src.utils.tensor_utils import to_tensor
@@ -112,9 +113,9 @@ class CamControl(nn.Module):
                                     layer_init(nn.Linear(hidden_dim, 1), std=1.0))
         self.actor_mean = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
                                         layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01))
-        self.actor_std = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
-                                       layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01))
-        # self.actor_std = nn.Parameter(torch.zeros([len(dataset.action_names)]))
+        # self.actor_std = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
+        #                                layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01))
+        self.actor_std = nn.Parameter(torch.zeros([len(dataset.action_names)]))
 
         self.actstd_init = actstd_init
 
@@ -149,13 +150,17 @@ class CamControl(nn.Module):
                 denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
                 proj_imgs = warp_perspective(F.interpolate(imgs, scale_factor=1 / 8), proj_mats.to(imgs.device),
                                              self.Rworld_shape).unflatten(0, [B, N]) * visible_mask[:, :, None]
-                for cam in range(N):
-                    visualize_img = T.ToPILImage()(denorm(imgs)[cam])
-                    plt.imshow(visualize_img)
-                    plt.show()
-                    visualize_img = T.ToPILImage()(denorm(proj_imgs.detach())[0, cam])
-                    plt.imshow(visualize_img)
-                    plt.show()
+                # for cam in range(N):
+                #     visualize_img = T.ToPILImage()(denorm(imgs)[cam])
+                #     plt.imshow(visualize_img)
+                #     plt.show()
+                #     visualize_img = T.ToPILImage()(denorm(proj_imgs.detach())[0, cam])
+                #     plt.imshow(visualize_img)
+                #     plt.show()
+                plt.imshow(make_grid(denorm(imgs[:N].cpu())).permute([1, 2, 0]))
+                plt.show()
+                plt.imshow(make_grid(denorm(proj_imgs[0].detach().cpu())).permute([1, 2, 0]))
+                plt.show()
 
             imgs_feat = self.base(imgs)
             imgs_feat = self.bottleneck(imgs_feat)
@@ -198,7 +203,7 @@ class CamControl(nn.Module):
 
         # output head
         action_mean = self.actor_mean(x)
-        action_std = F.softplus(torch.clamp(self.actor_std(x) + np.log(np.exp(self.actstd_init) - 1), -5, None))
+        action_std = F.softplus(torch.clamp(self.actor_std + np.log(np.exp(self.actstd_init) - 1), -5, None))
         if deterministic:
             # remove randomness during evaluation when deterministic=True
             return action_mean, self.critic(x), None, None
@@ -239,7 +244,7 @@ if __name__ == '__main__':
     yaw2 = torch.tensor([0, 15, 30, 60, 90, 150, 180, -120, -60, -180]) / 180
     dist_rot = dist_angle(yaw1[:, None], yaw2[None])
 
-    with open('../../cfg/RL/town05market.cfg', "r") as fp:
+    with open('../../cfg/RL/town04crossroad.cfg', "r") as fp:
         dataset_config = json.load(fp)
     dataset = frameDataset(CarlaX(dataset_config, port=2000, tm_port=8000, euler2vec='yaw-pitch'), interactive=True,
                            seed=0)
@@ -247,7 +252,7 @@ if __name__ == '__main__':
     (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) = next(iter(dataloader))
     imgs = F.interpolate(imgs.flatten(0, 1), scale_factor=1 / 10).unflatten(0, [*configs.shape[:2]])
 
-    model = CamControl(dataset, C, arch='encoder').cuda()
+    model = CamControl(dataset, C, arch='transformer').cuda()
     # state_dict = torch.load(
     #     '../../logs/carlax/RL_1_6dof+fix_moda_E_lr0.0001_stdtanhinit0.5wait10_ent0.001_regdecay0.1e10_cover0.0_divsteps1.0mu0.0_dir0.0_det_TASK_max_e30_2023-10-02_22-51-37/model.pth')
     # state_dict = {key.replace('control_module.', ''): value for key, value in state_dict.items() if
@@ -263,7 +268,7 @@ if __name__ == '__main__':
     # configs[masked_location] = -3
     state = step.repeat(B), configs.repeat([B, 1, 1]).cuda(), imgs.repeat([B, 1, 1, 1, 1]).cuda(), \
         aug_mats.repeat([B, 1, 1, 1]), proj_mats.repeat([B, 1, 1, 1])
-    action, value_, probs_, x_feat_ = model.get_action_and_value(state, visualize=False)
+    action, value_, probs_, x_feat_ = model.get_action_and_value(state, visualize=True)
     action, value, probs, x_feat = model.get_action_and_value(state, action)
     (step, configs, img, aug_mat, proj_mat, world_gt, img_gt, frame), next_done = \
         dataset.step(action.cpu().numpy()[0], visualize=True)
