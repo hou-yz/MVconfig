@@ -105,7 +105,7 @@ class CarlaCameraSeqEnv(gym.Env):
         # spectator
         # spectator = self.world.get_spectator()
         # spectator.set_transform(carla.Transform(carla.Location(*self.opts['cam_pos_lst'][0]),
-        #                         carla.Rotation(*self.opts['cam_dir_lst'][0])))
+        #                         carla.Rotation(self.opts['cam_dir_lst'][0][1], self.opts['cam_dir_lst'][0][0], 0))
 
         # CarlaX is xy indexing; x,y (w,h) (n_col,n_row)
         # x_min, x_max, _, _, _, _ = opts["spawn_area"]
@@ -286,8 +286,8 @@ class CarlaCameraSeqEnv(gym.Env):
 
     def spawn_and_render(self):
         # Reset the environment to its initial state and return the initial observation
-        self.respawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
-                                 motion=self.opts['motion'])
+        self.spawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
+                               motion=self.opts['motion'])
 
         time.sleep(SLEEP_TIME)
 
@@ -349,14 +349,14 @@ class CarlaCameraSeqEnv(gym.Env):
                                for cam_ in range(self.num_cam)},
             "step": self.step_counter
         }
-        self.update_pedestrian_gts()
+        # self.update_pedestrian_gts()
 
         # Set the reward for the current step
         reward = 0
         # Set condition for the end of episode: after a fixed number of step() call
         done = self.step_counter >= self.num_cam  # Set whether the episode has terminated or not
         # Set any additional information, the info can be used to calculate reward outside gym env
-        info = {"pedestrian_gts": copy.deepcopy(self.pedestrian_gts),
+        info = {"pedestrian_gts": [],
                 "camera_intrinsics": self.camera_intrinsics,
                 "camera_extrinsics": self.camera_extrinsics, }
 
@@ -394,8 +394,8 @@ class CarlaCameraSeqEnv(gym.Env):
         for camera in self.cameras.values():
             camera.destroy()
 
-    def respawn_pedestrians(self, n_chatgroup=4, chatgroup_size=(2, 4), chatgroup_radius=(0.5, 1.5),
-                            n_walk=15, n_roam=0, percentagePedestriansRunning=0.2, motion=False):
+    def spawn_pedestrians(self, n_chatgroup=4, chatgroup_size=(2, 4), chatgroup_radius=(0.5, 1.5),
+                          n_walk=15, n_roam=0, percentagePedestriansRunning=0.2, motion=False):
         # spawn parameter, make the spawn area 0.5m smaller
         min_x, max_x = self.opts["spawn_area"][0:2]
         min_y, max_y = self.opts["spawn_area"][2:4]
@@ -403,6 +403,7 @@ class CarlaCameraSeqEnv(gym.Env):
         max_x, max_y = max_x - 0.5, max_y - 0.5
         # 1. take all the random locations to spawn
         spawn_points = {'chat': [], 'walk': [], 'roam': []}
+        all_locations = []
         # chat
         for _ in range(n_chatgroup):
             group_center_x = self.random_generator.uniform(min_x, max_x)
@@ -415,26 +416,37 @@ class CarlaCameraSeqEnv(gym.Env):
 
                 spawn_x = min(max(group_center_x + offset_x, min_x), max_x)
                 spawn_y = min(max(group_center_y + offset_y, min_y), max_y)
-                loc = carla.Location(spawn_x, spawn_y, 1.0)
+                if len(all_locations) == 0:
+                    all_locations.append(np.array([spawn_x, spawn_y]))
+                else:
+                    all_dist = np.linalg.norm(np.array([spawn_x, spawn_y]) - np.array(all_locations), axis=-1)
+                    if np.min(all_dist) > MINIMAL_PEDESTRIAN_DISTANCE:
+                        all_locations.append(np.array([spawn_x, spawn_y]))
+                    else:
+                        continue
+                loc = carla.Location(spawn_x, spawn_y, 1.0 + self.opts['ref_plane'])
                 rot = carla.Rotation(0, math.degrees(math.atan2(-offset_y, -offset_x)), 0)
                 spawn_point = carla.Transform(loc, rot)
                 spawn_points['chat'].append(spawn_point)
-        # walk
-        for _ in range(n_walk):
+        # walk & roam
+        for i in range(n_walk + n_roam):
             spawn_x = self.random_generator.uniform(min_x, max_x)
             spawn_y = self.random_generator.uniform(min_y, max_y)
-            loc = carla.Location(spawn_x, spawn_y, 1.0)
+            if len(all_locations) == 0:
+                all_locations.append(np.array([spawn_x, spawn_y]))
+            else:
+                all_dist = np.linalg.norm(np.array([spawn_x, spawn_y]) - np.array(all_locations), axis=-1)
+                if np.min(all_dist) > MINIMAL_PEDESTRIAN_DISTANCE:
+                    all_locations.append(np.array([spawn_x, spawn_y]))
+                else:
+                    continue
+            loc = carla.Location(spawn_x, spawn_y, 1.0 + self.opts['ref_plane'])
             rot = carla.Rotation(0, self.random_generator.random() * 360, 0)
             spawn_point = carla.Transform(loc, rot)
-            spawn_points['walk'].append(spawn_point)
-        # roam
-        for _ in range(n_roam):
-            spawn_x = self.random_generator.uniform(min_x, max_x)
-            spawn_y = self.random_generator.uniform(min_y, max_y)
-            loc = carla.Location(spawn_x, spawn_y, 1.0)
-            rot = carla.Rotation(0, self.random_generator.random() * 360, 0)
-            spawn_point = carla.Transform(loc, rot)
-            spawn_points['roam'].append(spawn_point)
+            if i < n_walk:
+                spawn_points['walk'].append(spawn_point)
+            else:
+                spawn_points['roam'].append(spawn_point)
         # 2. we spawn the walker object
         batch = []
         walker_speed = []
@@ -466,34 +478,47 @@ class CarlaCameraSeqEnv(gym.Env):
                                          'type': types[i],
                                          'speed': walker_speed[i]})
         # print(f"{len(self.pedestrians)} pedestrians spawned")
-        if motion:
-            # 3. we spawn the walker controller
-            batch = []
-            for i in range(len(self.pedestrians)):
+        # 3. we spawn the walker controller
+        batch = []
+        controller_id_mapping = []
+        for i in range(len(self.pedestrians)):
+            if self.pedestrians[i]['type'] != 'chat':
                 batch.append(carla.command.SpawnActor(self.walker_controller_bp, carla.Transform(),
                                                       self.pedestrians[i]['id']))
-            results = self.client.apply_batch_sync(batch, True)
-            for i in range(len(results)):
-                if not results[i].error:
-                    self.pedestrians[i]["controller"] = results[i].actor_id
-            # 4. we put together the walkers and controllers id to get the objects from their id
-            # wait for a tick to ensure client receives the last transform of the walkers we have just created
-            self.world.tick()
+                controller_id_mapping.append(i)
+        results = self.client.apply_batch_sync(batch, True)
+        for i in range(len(results)):
+            if not results[i].error:
+                self.pedestrians[controller_id_mapping[i]]["controller"] = results[i].actor_id
+        # 4. we put together the walkers and controllers id to get the objects from their id
+        # wait for a tick to ensure client receives the last transform of the walkers we have just created
+        self.world.tick()
 
-            # 5. initialize each controller and set target to walk to (list is [controler, actor, controller, actor ...])
-            for pedestrian in self.pedestrians:
+        # 5. initialize each controller and set target to walk to (list is [controler, actor, controller, actor ...])
+        for pedestrian in self.pedestrians:
+            if pedestrian['type'] != 'chat':
                 ai_controller = self.world.get_actor(pedestrian['controller'])
                 ai_controller.start()
-                # start walking
-                if pedestrian['type'] != 'chat' and motion:
-                    # set walk to random point
-                    destination_x = self.random_generator.uniform(min_x, max_x)
-                    destination_y = self.random_generator.uniform(min_y, max_y)
-                    destination = carla.Location(destination_x, destination_y, 0.22)
-                    # all_actors[i].go_to_location(self.world.get_random_location_from_navigation())
-                    ai_controller.go_to_location(destination)
-                    # max speed
-                    ai_controller.set_max_speed(pedestrian['speed'])
+                # start walking to random point
+                destination_x = self.random_generator.uniform(min_x, max_x)
+                destination_y = self.random_generator.uniform(min_y, max_y)
+                destination = carla.Location(destination_x, destination_y, 1.0 + self.opts['ref_plane'])
+                # all_actors[i].go_to_location(self.world.get_random_location_from_navigation())
+                ai_controller.go_to_location(destination)
+                # max speed
+                ai_controller.set_max_speed(pedestrian['speed'] * self.random_generator.random())
+        # stablize world
+        for _ in range(10):
+            self.world.tick()
+        # 6. freeze pedestrians
+        if not motion:
+            for pedestrian in self.pedestrians:
+                if pedestrian['type'] != 'chat':
+                    ai_controller = self.world.get_actor(pedestrian['controller'])
+                    ai_controller.stop()
+                actor = self.world.get_actor(pedestrian['id'])
+                actor.set_simulate_physics(False)
+            pass
         pass
 
     def update_pedestrian_gts(self):

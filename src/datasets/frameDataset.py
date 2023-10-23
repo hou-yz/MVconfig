@@ -263,7 +263,7 @@ class frameDataset(VisionDataset):
                 self.cur_frame = self.frames[index]
             else:
                 assert self.interactive
-            if not self.interactive or index is None:
+            if not self.interactive or index is None:  # only spawn pedestrian after interactive steps (index==None)
                 observation, info = self.base.env.spawn_and_render()
             else:
                 observation, info = self.base.env.default_obs()
@@ -412,10 +412,10 @@ if __name__ == '__main__':
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), augmentation='affine+color')
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
 
-    with open('../../cfg/RL/town04crossroad.cfg', "r") as fp:
+    with open('cfg/RL/town04crossroad.cfg', "r") as fp:
         dataset_config = json.load(fp)
-    dataset = frameDataset(CarlaX(dataset_config, port=2100, tm_port=8100, euler2vec='yaw'),
-                           interactive=True, seed=seed)
+    dataset = frameDataset(CarlaX(dataset_config, port=2000, tm_port=8000, euler2vec='yaw'),
+                           interactive=False, seed=seed)
     # min_dist = np.inf
     # for world_gt in dataset.world_gt.values():
     #     x, y = world_gt[0][:, 0], world_gt[0][:, 1]
@@ -426,13 +426,14 @@ if __name__ == '__main__':
     #         pass
     dataloader = DataLoader(dataset, 2, True, num_workers=0)
     t0 = time.time()
-    _ = next(iter(dataloader))
+    # _ = next(iter(dataloader))
     for i in range(20):
         _ = dataset.__getitem__(i % len(dataset), visualize=True)
         if dataset.base.__name__ == 'CarlaX' and dataset.interactive:
             done = False
             while not done:
                 _, done = dataset.step(np.random.randn(len(dataset.action_names)), visualize=True)
+            _ = dataset.__getitem__(visualize=True)
 
     print(time.time() - t0)
     pass
