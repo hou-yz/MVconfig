@@ -127,7 +127,7 @@ def main(args):
 
     # model
     model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim,
-                  check_visible=args.dataset == 'carlax').cuda()
+                  args.dropout, check_visible=args.interactive).cuda()
     control_module = CamControl(train_set, args.hidden_dim, args.actstd_init,
                                 args.control_arch).cuda() if args.interactive else None
 
@@ -181,8 +181,7 @@ def main(args):
             # return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
             return 1 - (epoch - warmup_epochs) / (args.epochs - warmup_epochs + 1e-8)
 
-    scheduler_model = torch.optim.lr_scheduler.LambdaLR(optimizer_model, warmup_lr_scheduler) if not args.interactive \
-        else None
+    scheduler_model = None
     scheduler_agent = None
 
     trainer = PerspectiveTrainer(model, control_module, logdir, writer, args)
@@ -196,8 +195,6 @@ def main(args):
 
     # learn
     if not args.eval:
-        if not is_debug:
-            trainer.test(test_loader)
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
             train_loss, train_prec = trainer.train(epoch, train_loader, (optimizer_model, optimizer_agent),
@@ -224,9 +221,6 @@ def main(args):
     if args.dataset == 'carlax':
         base.env.close()
         carla_container.stop()
-        while carla_container.status != "exited":
-            carla_container.reload()
-            time.sleep(2)
     if args.interactive and not is_debug:
         writer.close()
     if not args.interactive and not args.eval:
@@ -246,7 +240,7 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--batch_size', type=int, default=None, help='input batch size for training')
     parser.add_argument('--dropcam', type=float, default=0.0)
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train')
-    parser.add_argument('--lr', type=float, default=5e-4, help='learning rate for task network')
+    parser.add_argument('--lr', type=float, default=1e-4, help='learning rate for task network')
     parser.add_argument('--base_lr_ratio', type=float, default=1.0)
     parser.add_argument('--other_lr_ratio', type=float, default=1.0)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
@@ -327,6 +321,7 @@ if __name__ == '__main__':
     # multiview detection specific settings
     parser.add_argument('--reID', action='store_true')
     parser.add_argument('--augmentation', type=str, default='affine')
+    parser.add_argument('--dropout', type=float, default=0.0)
     parser.add_argument('--id_ratio', type=float, default=0)
     parser.add_argument('--cls_thres', type=float, default=0.6)
     parser.add_argument('--alpha', type=float, default=0.0, help='ratio for per view loss')
