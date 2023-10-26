@@ -42,7 +42,6 @@ def docker_run_carla(gpu=0, carla_port=2000):
 
 #  ./CarlaUE4.sh -RenderOffScreen  -ini:[/Script/Engine.RendererSettings]:r.GraphicsAdapter=0 -carla-rpc-port=2000
 def run_carla(carla_path, off_screen=False, quality="Epic", gpu=2, port=2000):
-    assert quality in QUALITY
     script_path = os.path.join(carla_path, "CarlaUE4.sh")
     prompt = f"bash {script_path}"
     if off_screen:
@@ -101,6 +100,7 @@ class CarlaCameraSeqEnv(gym.Env):
         self.client = carla.Client(host, port)
         self.client.set_timeout(10.0)
         self.world = self.client.load_world(self.opts["map"])
+        self.total_episodes = 0
 
         # spectator
         # spectator = self.world.get_spectator()
@@ -172,8 +172,7 @@ class CarlaCameraSeqEnv(gym.Env):
         self.pedestrian_bps = self.world.get_blueprint_library().filter("walker.pedestrian.*")
         self.walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
 
-        # reset cameras only once
-        self.reset_cameras()
+        self.spawn_cameras()
         self.default_imgs = {cam: Image.fromarray(np.zeros([self.opts['cam_y'], self.opts['cam_x'], 3], dtype=np.uint8))
                              for cam in range(self.num_cam)}
 
@@ -267,6 +266,19 @@ class CarlaCameraSeqEnv(gym.Env):
             actor.destroy()
         self.pedestrians = []
         self.step_counter = 0
+
+        # reload world to clear up residue actors that got lost in the world
+        # https://github.com/carla-simulator/carla/issues/1207#issuecomment-470128947
+        if RELOAD_WORLD_FREQ and self.total_episodes % RELOAD_WORLD_FREQ == 0 and self.total_episodes:
+            print(f'reload world after {self.total_episodes} episodes ...')
+            for camera in self.cameras.values():
+                camera.destroy()
+            time.sleep(SLEEP_TIME * 10)
+            # Reload the current world, note that a new world is created with default settings using the same map.
+            # All actors present in the world will be destroyed, but traffic manager instances will stay alive.
+            self.world = self.client.reload_world(reset_settings=False)
+            self.spawn_cameras()
+        self.total_episodes += 1
 
     def default_obs(self):
         observation = {
@@ -371,10 +383,11 @@ class CarlaCameraSeqEnv(gym.Env):
         if cams is None: cams = list(range(self.num_cam))
         for cam in cams:
             self.cameras[cam].listen(self.img_cam_buffer[cam].put)
-        self.world.tick()
+        cur_frame = self.world.tick()
         # wait for sync until get all images
         for cam in cams:
             image = self.img_cam_buffer[cam].get()
+            assert image.frame == cur_frame
             images[cam] = process_img(image)
         # end listening
         for cam in cams:
@@ -424,7 +437,7 @@ class CarlaCameraSeqEnv(gym.Env):
                         all_locations.append(np.array([spawn_x, spawn_y]))
                     else:
                         continue
-                loc = carla.Location(spawn_x, spawn_y, 1.0 + self.opts['ref_plane'])
+                loc = carla.Location(spawn_x, spawn_y, 0.3 + self.opts['ref_plane'])
                 rot = carla.Rotation(0, math.degrees(math.atan2(-offset_y, -offset_x)), 0)
                 spawn_point = carla.Transform(loc, rot)
                 spawn_points['chat'].append(spawn_point)
@@ -440,7 +453,7 @@ class CarlaCameraSeqEnv(gym.Env):
                     all_locations.append(np.array([spawn_x, spawn_y]))
                 else:
                     continue
-            loc = carla.Location(spawn_x, spawn_y, 1.0 + self.opts['ref_plane'])
+            loc = carla.Location(spawn_x, spawn_y, 0.3 + self.opts['ref_plane'])
             rot = carla.Rotation(0, self.random_generator.random() * 360, 0)
             spawn_point = carla.Transform(loc, rot)
             if i < n_walk:
@@ -461,7 +474,7 @@ class CarlaCameraSeqEnv(gym.Env):
                 if pattern == 'chat' or not walker_bp.has_attribute('speed'):
                     walker_speed.append(0.0)
                 else:
-                    if (random.random() > percentagePedestriansRunning):
+                    if (self.random_generator.random() > percentagePedestriansRunning):
                         # walking
                         walker_speed.append(float(walker_bp.get_attribute('speed').recommended_values[1]))
                     else:
@@ -470,7 +483,8 @@ class CarlaCameraSeqEnv(gym.Env):
                 batch.append(carla.command.SpawnActor(walker_bp, spawn_point))
                 types.append(pattern)
         # apply spawn pedestrian
-        results = self.client.apply_batch_sync(batch, True)
+        # BUG FIX: make sure that 'apply_batch_sync' will not do another tick()
+        results = self.client.apply_batch_sync(batch, do_tick=False)
         for i in range(len(results)):
             if not results[i].error:
                 # if error happens, very likely to be spawning failure caused by collision
@@ -478,48 +492,49 @@ class CarlaCameraSeqEnv(gym.Env):
                                          'type': types[i],
                                          'speed': walker_speed[i]})
         # print(f"{len(self.pedestrians)} pedestrians spawned")
-        # 3. we spawn the walker controller
-        batch = []
-        controller_id_mapping = []
-        for i in range(len(self.pedestrians)):
-            if self.pedestrians[i]['type'] != 'chat':
-                batch.append(carla.command.SpawnActor(self.walker_controller_bp, carla.Transform(),
-                                                      self.pedestrians[i]['id']))
-                controller_id_mapping.append(i)
-        results = self.client.apply_batch_sync(batch, True)
-        for i in range(len(results)):
-            if not results[i].error:
-                self.pedestrians[controller_id_mapping[i]]["controller"] = results[i].actor_id
-        # 4. we put together the walkers and controllers id to get the objects from their id
-        # wait for a tick to ensure client receives the last transform of the walkers we have just created
-        self.world.tick()
-
-        # 5. initialize each controller and set target to walk to (list is [controler, actor, controller, actor ...])
-        for pedestrian in self.pedestrians:
-            if pedestrian['type'] != 'chat':
-                ai_controller = self.world.get_actor(pedestrian['controller'])
-                ai_controller.start()
-                # start walking to random point
-                destination_x = self.random_generator.uniform(min_x, max_x)
-                destination_y = self.random_generator.uniform(min_y, max_y)
-                destination = carla.Location(destination_x, destination_y, 1.0 + self.opts['ref_plane'])
-                # all_actors[i].go_to_location(self.world.get_random_location_from_navigation())
-                ai_controller.go_to_location(destination)
-                # max speed
-                ai_controller.set_max_speed(pedestrian['speed'] * self.random_generator.random())
-        # stablize world
-        for _ in range(10):
+        if motion:
+            # 3. we spawn the walker controller
+            batch = []
+            controller_id_mapping = []
+            for i in range(len(self.pedestrians)):
+                if self.pedestrians[i]['type'] != 'chat':
+                    batch.append(carla.command.SpawnActor(self.walker_controller_bp, carla.Transform(),
+                                                          self.pedestrians[i]['id']))
+                    controller_id_mapping.append(i)
+            results = self.client.apply_batch_sync(batch, True)
+            for i in range(len(results)):
+                if not results[i].error:
+                    self.pedestrians[controller_id_mapping[i]]["controller"] = results[i].actor_id
+            # 4. we put together the walkers and controllers id to get the objects from their id
+            # wait for a tick to ensure client receives the last transform of the walkers we have just created
             self.world.tick()
-        # 6. freeze pedestrians
-        if not motion:
+
+            # 5. initialize each controller and set target to walk to (list is [controler, actor, controller, actor ...])
             for pedestrian in self.pedestrians:
                 if pedestrian['type'] != 'chat':
                     ai_controller = self.world.get_actor(pedestrian['controller'])
-                    ai_controller.stop()
-                actor = self.world.get_actor(pedestrian['id'])
-                actor.set_simulate_physics(False)
+                    ai_controller.start()
+                    # start walking to random point
+                    destination_x = self.random_generator.uniform(min_x, max_x)
+                    destination_y = self.random_generator.uniform(min_y, max_y)
+                    destination = carla.Location(destination_x, destination_y, 0.3 + self.opts['ref_plane'])
+                    # all_actors[i].go_to_location(self.world.get_random_location_from_navigation())
+                    ai_controller.go_to_location(destination)
+                    # max speed
+                    ai_controller.set_max_speed(pedestrian['speed'])
+            # stablize world
+            for _ in range(5):
+                self.world.tick()
+            # 6. freeze pedestrians
+            if not motion:
+                for pedestrian in self.pedestrians:
+                    if pedestrian['type'] != 'chat':
+                        ai_controller = self.world.get_actor(pedestrian['controller'])
+                        ai_controller.stop()
+                    actor = self.world.get_actor(pedestrian['id'])
+                    actor.set_simulate_physics(False)
+                pass
             pass
-        pass
 
     def update_pedestrian_gts(self):
         self.pedestrian_gts = []
@@ -603,16 +618,7 @@ class CarlaCameraSeqEnv(gym.Env):
 
         return pedestrian_view
 
-    def reset_cameras(self, cfg=None):
-        # destroy existing cameras
-        for camera in self.cameras.values():
-            camera.destroy()
-        self.camera_configs = {}
-        self.camera_intrinsics = {}
-        self.camera_extrinsics = {}
-        self.cameras = {}
-        self.img_cam_buffer = {}
-
+    def spawn_cameras(self, cfg=None):
         if cfg is None:
             locations = np.array(self.opts["cam_pos_lst"])
             rotations = np.array(self.opts["cam_dir_lst"])
@@ -629,7 +635,7 @@ class CarlaCameraSeqEnv(gym.Env):
             camera_init_trans = carla.Transform(loc, rot)
             # spawn the camera
             self.cameras[cam] = self.world.spawn_actor(self.camera_bp, camera_init_trans)
-            self.img_cam_buffer[cam] = Queue(maxsize=0)
+            self.img_cam_buffer[cam] = Queue(maxsize=1)
 
             # record camera related information
             # save camera configs, rather than projection matrices

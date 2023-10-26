@@ -81,15 +81,15 @@ class frameDataset(VisionDataset):
         # reduce = input/output
         self.world_reduce, self.img_reduce = world_reduce, img_reduce
         self.img_shape, self.worldgrid_shape = base.img_shape, base.worldgrid_shape  # H,W; N_row,N_col
-        self.Rimg_shape = (np.array(self.img_shape) * 8 // self.img_reduce).tolist()
+        trans_img_shape = (np.array(self.img_shape) * 8 // self.img_reduce).tolist()
         self.world_kernel_size, self.img_kernel_size = world_kernel_size, img_kernel_size
         self.augmentation = augmentation
         self.transform = T.Compose([T.ToTensor(),
-                                    T.Resize(self.Rimg_shape, antialias=True),
+                                    T.Resize(trans_img_shape, antialias=True),
                                     T.ColorJitter(0.4, 0.4, 0.4),
                                     T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
                                     ]) if 'color' in self.augmentation else \
-            T.Compose([T.ToTensor(), T.Resize(self.Rimg_shape, antialias=True),
+            T.Compose([T.ToTensor(), T.Resize(trans_img_shape, antialias=True),
                        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
         self.interactive = interactive
 
@@ -325,13 +325,15 @@ class frameDataset(VisionDataset):
         def plt_visualize():
             import cv2
             from matplotlib.patches import Circle
-            # fig, ax = plt.subplots(1)
-            # ax.imshow(img)
-            # for i in range(len(img_x_s)):
-            #     x, y = img_x_s[i], img_y_s[i]
-            #     if x > 0 and y > 0:
-            #         ax.add_patch(Circle((x, y), 10))
-            # plt.show()
+            fig, ax = plt.subplots(1)
+            ax.imshow(img)
+            for i in range(len(img_x_s)):
+                x, y = img_x_s[i], img_y_s[i]
+                if x > 0 and y > 0:
+                    ax.add_patch(Circle((x, y), 10))
+            plt.show()
+            plt.imshow(img_gt['heatmap'][0].numpy())
+            plt.show()
             img0 = img.copy()
             for bbox in cam_img_bboxs:
                 bbox = tuple(int(pt) for pt in bbox)
@@ -409,13 +411,13 @@ if __name__ == '__main__':
     # torch.cuda.manual_seed(seed)
     # torch.cuda.manual_seed_all(seed)
 
-    # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), augmentation='affine+color')
+    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), augmentation='affine+color')
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
 
-    with open('cfg/RL/town04crossroad.cfg', "r") as fp:
-        dataset_config = json.load(fp)
-    dataset = frameDataset(CarlaX(dataset_config, port=2000, tm_port=8000, euler2vec='yaw'),
-                           interactive=False, seed=seed)
+    # with open('cfg/RL/town04crossroad.cfg', "r") as fp:
+    #     dataset_config = json.load(fp)
+    # dataset = frameDataset(CarlaX(dataset_config, port=2000, tm_port=8000, euler2vec='yaw'),
+    #                        interactive=False, seed=seed)
     # min_dist = np.inf
     # for world_gt in dataset.world_gt.values():
     #     x, y = world_gt[0][:, 0], world_gt[0][:, 1]
@@ -426,6 +428,7 @@ if __name__ == '__main__':
     #         pass
     dataloader = DataLoader(dataset, 2, True, num_workers=0)
     t0 = time.time()
+    people_cnt = []
     # _ = next(iter(dataloader))
     for i in range(20):
         _ = dataset.__getitem__(i % len(dataset), visualize=True)
@@ -434,6 +437,9 @@ if __name__ == '__main__':
             while not done:
                 _, done = dataset.step(np.random.randn(len(dataset.action_names)), visualize=True)
             _ = dataset.__getitem__(visualize=True)
+        print(_[5]['reg_mask'].sum().item())
+        people_cnt.append(_[5]['reg_mask'].sum().item())
+    print(np.mean(people_cnt))
 
     print(time.time() - t0)
     pass
