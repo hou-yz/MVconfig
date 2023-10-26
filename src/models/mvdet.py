@@ -32,9 +32,9 @@ def output_head(in_dim, feat_dim, out_dim):
 
 class MVDet(MultiviewBase):
     def __init__(self, dataset, arch='resnet18', aggregation='max',
-                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0, dropout=0.1, check_visible=False):
+                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0, dropout=0.0, check_visible=False):
         super().__init__(dataset, aggregation)
-        self.Rimg_shape, self.Rworld_shape = np.array(dataset.Rimg_shape), np.array(dataset.Rworld_shape)
+        self.Rimg_shape, self.Rworld_shape = dataset.Rimg_shape, dataset.Rworld_shape
         self.Rworldgrid_from_worldcoord = dataset.Rworldgrid_from_worldcoord
         self.img_reduce = dataset.img_reduce
 
@@ -51,7 +51,8 @@ class MVDet(MultiviewBase):
             raise Exception('architecture currently support [vgg11, resnet18]')
 
         if use_bottleneck:
-            self.bottleneck = nn.Sequential(nn.Conv2d(self.base_dim, hidden_dim, 1), nn.ReLU())
+            # https://discuss.pytorch.org/t/what-is-the-difference-between-nn-dropout2d-and-nn-dropout/108192/2
+            self.bottleneck = nn.Sequential(nn.Conv2d(self.base_dim, hidden_dim, 1), nn.ReLU(), nn.Dropout2d(dropout))
             self.base_dim = hidden_dim
         else:
             self.bottleneck = nn.Identity()
@@ -63,9 +64,7 @@ class MVDet(MultiviewBase):
         # self.img_id = output_head(base_dim, outfeat_dim, len(dataset.pid_dict))
 
         # world feat
-        # https://discuss.pytorch.org/t/what-is-the-difference-between-nn-dropout2d-and-nn-dropout/108192/2
-        self.world_feat = nn.Sequential(nn.Dropout2d(dropout),
-                                        nn.Conv2d(self.base_dim, hidden_dim, 3, padding=1), nn.ReLU(),
+        self.world_feat = nn.Sequential(nn.Conv2d(self.base_dim, hidden_dim, 3, padding=1), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=2, dilation=2), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
 
@@ -144,9 +143,9 @@ class MVDet(MultiviewBase):
         #         plt.imshow(visualize_img)
         #         plt.show()
 
-        return world_feat, (F.interpolate(imgs_heatmap, tuple(self.Rimg_shape)),
-                            F.interpolate(imgs_offset, tuple(self.Rimg_shape)),
-                            F.interpolate(imgs_wh, tuple(self.Rimg_shape)))
+        return world_feat, (F.interpolate(imgs_heatmap, self.Rimg_shape),
+                            F.interpolate(imgs_offset, self.Rimg_shape),
+                            F.interpolate(imgs_wh, self.Rimg_shape))
 
     def get_output(self, world_feat, visualize=False):
         B, N, C, H, W = world_feat.shape
