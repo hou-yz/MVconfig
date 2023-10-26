@@ -133,7 +133,7 @@ class PerspectiveTrainer(object):
             imgs[:, cam] = F.interpolate(img, scale_factor=1 / 10)
             action_history.append(action.cpu())
         # step N (step range is 0 ~ N-1 so this is after done=True): calculate rewards
-        (step, configs, imgs, aug_mats, proj_mats, world_gt, img_gt, frame) = dataset.__getitem__()
+        (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) = dataset.__getitem__()
         imgs = to_tensor(imgs)[None]
         aug_mats, proj_mats = to_tensor(aug_mats)[None], to_tensor(proj_mats)[None]
         model_feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
@@ -144,7 +144,9 @@ class PerspectiveTrainer(object):
                 Image.fromarray(cover_visualize(dataset, model_feat[0], world_heatmap[0], world_gt)
                                 ).save(f'{self.logdir}/cover_{batch_idx}.png')
                 save_image(make_grid(imgs[0], normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
-            return model_feat.cpu(), (world_heatmap.detach().cpu(), world_offset.detach().cpu())
+            return (model_feat.cpu(), (world_heatmap.detach().cpu(), world_offset.detach().cpu()),
+                    ({key: value[None] for key, value in world_gt.items()},
+                     {key: value[None] for key, value in imgs_gt.items()}))
 
         rewards, stats = self.rl_rewards(
             dataset, action_history, model_feat[0].cpu(), (world_heatmap, world_offset), world_gt, frame)
@@ -188,7 +190,8 @@ class PerspectiveTrainer(object):
                 # self.writer.add_image("images/imgs", make_grid(torch.cat(imgs), normalize=True),
                 #                       self.rl_global_step, dataformats='CHW')
 
-        return model_feat, (world_heatmap, world_offset)
+        return model_feat, (world_heatmap, world_offset), ({key: value[None] for key, value in world_gt.items()},
+                                                           {key: value[None] for key, value in imgs_gt.items()})
 
     def expand_mean_actions(self, dataset, ):
         configs = torch.ones([1, dataset.num_cam, dataset.config_dim]).cuda() * CONFIGS_PADDING_VALUE
@@ -516,16 +519,16 @@ class PerspectiveTrainer(object):
                 self.model.train()
             if self.args.base_lr_ratio == 0:
                 self.model.base.eval()
-            for key in imgs_gt.keys():
-                imgs_gt[key] = imgs_gt[key].flatten(0, 1)
             if self.args.interactive:
                 self.agent.eval()
-                feat, (world_heatmap, world_offset) = self.expand_episode(
+                feat, (world_heatmap, world_offset), (world_gt, imgs_gt) = self.expand_episode(
                     dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
                     True, visualize=self.rl_global_step % 500 == 0)
             else:
                 (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = \
                     self.model(imgs.cuda(), aug_mats, proj_mats)
+            for key in imgs_gt.keys():
+                imgs_gt[key] = imgs_gt[key].flatten(0, 1)
             # MVDet loss
             if self.args.use_mse:
                 w_loss = F.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device))
@@ -543,8 +546,10 @@ class PerspectiveTrainer(object):
                     loss_img_wh = regL1loss(imgs_wh, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['wh'])
                     # loss_img_id = self.ce_loss(imgs_id, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['pid'])
                     img_loss = loss_img_hm + loss_img_off + loss_img_wh * 0.1  # + self.args.id_ratio * loss_img_id
+            else:
+                img_loss = torch.zeros([]).cuda()
 
-            loss = w_loss + img_loss / N * self.args.alpha if not self.args.interactive else w_loss
+            loss = w_loss + img_loss / N * self.args.alpha
             losses += loss.item()
 
             # train MVDet
@@ -586,7 +591,7 @@ class PerspectiveTrainer(object):
                 if self.args.interactive:
                     self.agent.eval()
                     assert B == 1, 'only support batch_size/num_envs == 1'
-                    feat, (world_heatmap, world_offset) = self.expand_episode(
+                    feat, (world_heatmap, world_offset), (world_gt, imgs_gt) = self.expand_episode(
                         dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
                         visualize=(batch_idx < 5), batch_idx=batch_idx)
                 else:
