@@ -112,7 +112,7 @@ class CamControl(nn.Module):
         self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
                                     layer_init(nn.Linear(hidden_dim, 1), std=1.0))
         self.actor_mean = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
-                                        layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01))
+                                        layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01), nn.Tanh())
         # self.actor_std = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
         #                                layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01))
         self.actor_std = nn.Parameter(torch.zeros([len(dataset.action_names)]))
