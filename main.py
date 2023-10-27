@@ -128,8 +128,8 @@ def main(args):
     # model
     model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim,
                   args.dropout, check_visible=args.interactive).cuda()
-    control_module = CamControl(train_set, args.hidden_dim, args.actstd_init,
-                                args.control_arch).cuda() if args.interactive else None
+    control_module = CamControl(train_set, args.hidden_dim, args.actstd_init, args.control_arch,
+                                use_tanh=args.action_clip == 'clip').cuda() if args.interactive else None
 
     # load checkpoint
     writer = None

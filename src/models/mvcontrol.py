@@ -57,7 +57,7 @@ class ConvDecoder(nn.Module):
 
 
 class CamControl(nn.Module):
-    def __init__(self, dataset, hidden_dim, actstd_init=1.0, arch='encoder'):
+    def __init__(self, dataset, hidden_dim, actstd_init=1.0, arch='encoder', use_tanh=False):
         super().__init__()
         self.world_reduce, self.img_reduce = 40, 120
         self.Rworld_shape = tuple(map(lambda x: x // self.world_reduce, dataset.worldgrid_shape))
@@ -112,7 +112,8 @@ class CamControl(nn.Module):
         self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
                                     layer_init(nn.Linear(hidden_dim, 1), std=1.0))
         self.actor_mean = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
-                                        layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01), nn.Tanh())
+                                        layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01),
+                                        nn.Tanh() if use_tanh else nn.Identity())
         # self.actor_std = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
         #                                layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01))
         self.actor_std = nn.Parameter(torch.zeros([len(dataset.action_names)]))
