@@ -106,7 +106,7 @@ def main(args):
     # logging
     RL_settings = f'RL_fix_{args.reward}_{"J_" if args.joint_training else ""}{args.control_arch[0].upper()}_' \
                   f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
-                  f'{args.action_clip}_ent{args.ent_coef}_' \
+                  f'{args.action_mapping}_ent{args.ent_coef}_' \
                   f'cover{args.cover_coef}_divsteps{args.steps_div_coef}mu{args.mu_div_coef}_dir{args.dir_coef}_' \
                   f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}' \
@@ -129,7 +129,7 @@ def main(args):
     model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim,
                   args.dropout, check_visible=args.interactive).cuda()
     control_module = CamControl(train_set, args.hidden_dim, args.actstd_init, args.control_arch,
-                                use_tanh=args.action_clip == 'clip').cuda() if args.interactive else None
+                                use_tanh=args.action_mapping == 'clip').cuda() if args.interactive else None
 
     # load checkpoint
     writer = None
@@ -262,7 +262,7 @@ if __name__ == '__main__':
     parser.add_argument('--control_arch', type=str, default='encoder')
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
     parser.add_argument('--euler2vec', type=str, default='yaw')
-    parser.add_argument("--action_clip", type=str, default='tanh', choices=['clip', 'tanh'])
+    parser.add_argument("--action_mapping", type=str, default='clip', choices=['clip', 'tanh'])
     # https://arxiv.org/abs/2006.05990
     parser.add_argument('--actstd_init', type=float, default=0.5, help='initial value actor std')
     parser.add_argument("--reward", default='moda')

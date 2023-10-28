@@ -82,12 +82,12 @@ class PerspectiveTrainer(object):
         self.unit_world_grids = torch.tensor(np.stack([xx, yy], axis=2), dtype=torch.float).flatten(0, 1)
 
     def action_mapping(self, action):
-        if self.args.action_clip == 'clip':
+        if self.args.action_mapping == 'clip':
             direction_idx = torch.tensor(['dir' in name for name in self.agent.action_names]).to(action.device)
             action = action / (action[..., direction_idx].norm(dim=-1, keepdim=True) * direction_idx +
                                ~direction_idx + 1e-8)
             action = torch.clamp(action, -1, 1)
-        elif self.args.action_clip == 'tanh':
+        elif self.args.action_mapping == 'tanh':
             action = torch.tanh(action)
         else:
             raise Exception
@@ -410,7 +410,7 @@ class PerspectiveTrainer(object):
                 entropy_loss = (probs.entropy() +
                                 expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale],
                                             tanh_prime, device='cuda')
-                                ).sum(-1).mean() if self.args.action_clip == 'tanh' else probs.entropy().sum(-1).mean()
+                                ).sum(-1).mean() if self.args.action_mapping == 'tanh' else probs.entropy().sum(-1).mean()
 
                 # div loss
                 mb_action_history = b_actions[b_action_history_inds[mb_inds]].cuda()
