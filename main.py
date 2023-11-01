@@ -73,8 +73,9 @@ def main(args):
             args.lr *= 0.1
             if not args.joint_training:
                 args.base_lr_ratio = args.other_lr_ratio = 0
-        args.div_xy_coef *= (dataset_config['camera_range'][1] - dataset_config['camera_range'][0]) / \
-                            (dataset_config['spawn_area'][1] - dataset_config['spawn_area'][0])
+        X0, X1, Y0, Y1 = dataset_config['camera_range'][:4]
+        x0, x1, y0, y1 = dataset_config['spawn_area']
+        args.div_xy_coef *= np.array([X1 - X0, Y1 - Y0]) / ((X1 - X0) * (Y1 - Y0)) ** 0.5
     else:
         # args.augmentation += '+color'
         if args.dataset == 'wildtrack':
@@ -86,10 +87,10 @@ def main(args):
         args.batch_size = 1 if args.batch_size is None else args.batch_size
         args.interactive = False
 
-    train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce, img_reduce=args.img_reduce,
+    train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
                              world_kernel_size=args.world_kernel_size, img_kernel_size=args.img_kernel_size,
                              interactive=args.interactive, augmentation=args.augmentation, seed=args.carla_seed)
-    test_set = frameDataset(base, split='test', world_reduce=args.world_reduce, img_reduce=args.img_reduce,
+    test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
                             world_kernel_size=args.world_kernel_size, img_kernel_size=args.img_kernel_size,
                             interactive=args.interactive, seed=args.carla_seed)
 
@@ -259,7 +260,8 @@ if __name__ == '__main__':
     parser.add_argument('--carla_tm_port', type=int, default=8000)
     parser.add_argument('--carla_gpu', type=int, default=0)
     # RL arguments
-    parser.add_argument('--control_arch', type=str, default='encoder')
+    parser.add_argument('--control_arch', type=str, default='encoder',
+                        choices=['encoder', 'transformer', 'conv'])
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
     parser.add_argument('--euler2vec', type=str, default='yaw')
     parser.add_argument("--action_mapping", type=str, default='clip', choices=['clip', 'tanh'])
@@ -303,7 +305,7 @@ if __name__ == '__main__':
                         help="coefficient of chosen action diversity")
     parser.add_argument("--mu_div_coef", type=float, default=0.0,
                         help="coefficient of mean action diversity")
-    parser.add_argument("--div_clamp", type=float, default=2.0,
+    parser.add_argument("--div_clamp", type=float, default=None,
                         help="clamp range of chosen action diversity")
     parser.add_argument("--div_xy_coef", type=float, default=1.0)
     parser.add_argument("--div_yaw_coef", type=float, default=0.5)
@@ -331,7 +333,6 @@ if __name__ == '__main__':
     parser.add_argument('--outfeat_dim', type=int, default=0)
     parser.add_argument('--world_reduce', type=int, default=4)
     parser.add_argument('--world_kernel_size', type=int, default=10)
-    parser.add_argument('--img_reduce', type=int, default=12)
     parser.add_argument('--img_kernel_size', type=int, default=10)
 
     args = parser.parse_args()

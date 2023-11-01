@@ -8,8 +8,8 @@ def dist_action(act1, act2, action_names, xy_coef=1.0, yaw_coef=1.0, return_xys=
     if 'x' in action_names and 'y' in action_names:
         idx = [action_names.index('x'), action_names.index('y')]
         xy1, xy2 = act1[..., idx], act2[..., idx]
-        dist_loc_ = dist_l2(xy1, xy2)
-        dist_ = dist_ + dist_loc_ * xy_coef if dist_ is not None else dist_loc_ * xy_coef
+        dist_loc_ = dist_l2(xy1 * to_tensor(xy_coef, device=xy1.device), xy2 * to_tensor(xy_coef, device=xy2.device))
+        dist_ = dist_ + dist_loc_ if dist_ is not None else dist_loc_
     else:
         xy1, xy2 = (torch.zeros([*act1.shape[:-1], 2], device=act1.device),
                     torch.zeros([*act2.shape[:-1], 2], device=act2.device))
