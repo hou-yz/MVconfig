@@ -410,7 +410,8 @@ class PerspectiveTrainer(object):
                 entropy_loss = (probs.entropy() +
                                 expectation(probs, [probs.loc - 3 * probs.scale, probs.loc + 3 * probs.scale],
                                             tanh_prime, device='cuda')
-                                ).sum(-1).mean() if self.args.action_mapping == 'tanh' else probs.entropy().sum(-1).mean()
+                                ).sum(-1).mean() if self.args.action_mapping == 'tanh' \
+                    else probs.entropy().sum(-1).mean()
 
                 # div loss
                 mb_action_history = b_actions[b_action_history_inds[mb_inds]].cuda()
@@ -421,12 +422,17 @@ class PerspectiveTrainer(object):
                                                                 dataset.action_names,
                                                                 self.args.div_xy_coef,
                                                                 self.args.div_yaw_coef, True)
-                steps_mask = torch.arange(N).repeat([B, 1]) < b_step[mb_inds, None]
-                # TODO: revert steps_div to min()
-                if steps_mask.any():
-                    steps_div = torch.clamp(action_dist[steps_mask], 0, self.args.div_clamp).mean()
-                else:
-                    steps_div = torch.zeros([]).cuda()
+                # steps_mask = torch.arange(N).repeat([B, 1]) < b_step[mb_inds, None]
+                # if steps_mask.any():
+                #     steps_div = torch.clamp(action_dist[steps_mask], 0, self.args.div_clamp).mean()
+                # else:
+                #     steps_div = torch.zeros([]).cuda()
+                min_dist = torch.zeros([B]).cuda()
+                for b in range(B):
+                    step = b_step[mb_inds][b].item()
+                    if step > 0:
+                        min_dist[b] += torch.min(action_dist[b, :step])
+                steps_div = torch.clamp(min_dist, 0, self.args.div_clamp).mean()
                 # make sure cameras won't look directly outside
                 delta_dir = torch.clamp((xy + 0.1 * delta_xy).norm(dim=-1) - xy.norm(dim=-1), 0, None).mean() / 0.1
                 # action diversity in terms of \mu
