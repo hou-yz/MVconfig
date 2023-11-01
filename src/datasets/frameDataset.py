@@ -68,7 +68,7 @@ def read_pom(root):
 
 
 class frameDataset(VisionDataset):
-    def __init__(self, base, split='train', reID=False, world_reduce=4, img_reduce=12,
+    def __init__(self, base, split='train', reID=False, world_reduce=4, trans_img_shape=(720, 1280),
                  world_kernel_size=10, img_kernel_size=10,
                  split_ratio=(0.8, 0.1, 0.1), top_k=100, force_download=True, augmentation='',
                  interactive=False, seed=None):
@@ -79,9 +79,10 @@ class frameDataset(VisionDataset):
         # world (grid) reduce: on top of the 2.5cm grid
         self.reID, self.top_k = reID, top_k
         # reduce = input/output
-        self.world_reduce, self.img_reduce = world_reduce, img_reduce
+        self.world_reduce = world_reduce
         self.img_shape, self.worldgrid_shape = base.img_shape, base.worldgrid_shape  # H,W; N_row,N_col
-        trans_img_shape = (np.array(self.img_shape) * 8 // self.img_reduce).tolist()
+
+        self.img_reduce = self.img_shape[0] // (trans_img_shape[0] // 8)
         self.world_kernel_size, self.img_kernel_size = world_kernel_size, img_kernel_size
         self.augmentation = augmentation
         self.transform = T.Compose([T.ToTensor(),
@@ -94,7 +95,7 @@ class frameDataset(VisionDataset):
         self.interactive = interactive
 
         self.Rworld_shape = list(map(lambda x: x // self.world_reduce, self.worldgrid_shape))
-        self.Rimg_shape = np.ceil(np.array(self.img_shape) / self.img_reduce).astype(int).tolist()
+        self.Rimg_shape = np.ceil(np.array(trans_img_shape) // 8).astype(int).tolist()
 
         # world_grid (projected feature map) <- coordinate translation -> world_coord <- camera matrix -> image coord
         self.Rworldgrid_from_worldcoord = np.linalg.inv(self.base.worldcoord_from_worldgrid_mat @
