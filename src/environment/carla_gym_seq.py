@@ -173,7 +173,6 @@ class CarlaCameraSeqEnv(gym.Env):
         self.walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
 
         self.spawn_cameras()
-        time.sleep(SLEEP_TIME * 10)
         self.default_imgs = {cam: Image.fromarray(np.zeros([self.opts['cam_y'], self.opts['cam_x'], 3], dtype=np.uint8))
                              for cam in range(self.num_cam)}
 
@@ -279,7 +278,6 @@ class CarlaCameraSeqEnv(gym.Env):
             # All actors present in the world will be destroyed, but traffic manager instances will stay alive.
             self.world = self.client.reload_world(reset_settings=False)
             self.spawn_cameras()
-            time.sleep(SLEEP_TIME * 10)
         self.total_episodes += 1
 
     def default_obs(self):
@@ -646,6 +644,7 @@ class CarlaCameraSeqEnv(gym.Env):
             self.camera_configs[cam] = cam_config
             self.camera_intrinsics[cam] = intrinsic
             self.camera_extrinsics[cam] = extrinsic
+        self.world.tick()
 
 
 def process_img(img):
