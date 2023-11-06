@@ -1,3 +1,4 @@
+import copy
 import time
 import math
 from kornia.geometry import warp_perspective
@@ -127,8 +128,8 @@ class CamControl(nn.Module):
         step, configs, imgs, aug_mats, proj_mats = state
         B, N, _, H, W = imgs.shape
 
-        padding_location = torch.arange(N).repeat([B, 1]) >= step[:, None]
-        step_location = (torch.arange(N).repeat([B, 1]) == step[:, None])
+        padding_location = (torch.arange(N).repeat([B, 1]) >= step[:, None]).to(imgs.device)
+        step_location = (torch.arange(N).repeat([B, 1]) == step[:, None]).to(imgs.device)
 
         # feature branch
         if self.arch == 'conv' or self.arch == 'transformer':
@@ -150,7 +151,8 @@ class CamControl(nn.Module):
             if visualize:
                 denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
                 proj_imgs = warp_perspective(F.interpolate(imgs, scale_factor=1 / 8), proj_mats.to(imgs.device),
-                                             self.Rworld_shape).unflatten(0, [B, N]) * visible_mask[:, :, None]
+                                             self.Rworld_shape).unflatten(0, [B, N]) * \
+                            visible_mask[:, :, None] * ~padding_location[..., None, None, None]
                 # for cam in range(N):
                 #     visualize_img = T.ToPILImage()(denorm(imgs)[cam])
                 #     plt.imshow(visualize_img)
@@ -166,7 +168,7 @@ class CamControl(nn.Module):
             imgs_feat = self.base(imgs)
             imgs_feat = self.bottleneck(imgs_feat)
             world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device), self.Rworld_shape).unflatten(0, [B, N])
-            world_feat *= visible_mask[:, :, None]
+            world_feat *= visible_mask[:, :, None] * ~padding_location[..., None, None, None]
 
             # if visualize:
             #     for cam in range(N):
@@ -247,13 +249,17 @@ if __name__ == '__main__':
 
     with open('../../cfg/RL/town04crossroad.cfg', "r") as fp:
         dataset_config = json.load(fp)
-    dataset = frameDataset(CarlaX(dataset_config, port=2000, tm_port=8000, euler2vec='yaw-pitch'), interactive=True,
+    dataset = frameDataset(CarlaX(dataset_config, port=2100, tm_port=8100, euler2vec='yaw-pitch'), interactive=True,
                            seed=0)
+    default_cfg = copy.deepcopy(dataset.base.env.camera_configs)
     dataloader = DataLoader(dataset, 1, False, num_workers=0)
     (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) = next(iter(dataloader))
-    imgs = F.interpolate(imgs.flatten(0, 1), scale_factor=1 / 10).unflatten(0, [*configs.shape[:2]])
+    imgs = F.interpolate(imgs.flatten(0, 1), scale_factor=1 / 10
+                         ).unflatten(0, [*configs.shape[:2]]).repeat([B, 1, 1, 1, 1])
+    configs = configs.repeat([B, 1, 1])
+    aug_mats, proj_mats = aug_mats.repeat([B, 1, 1, 1]), proj_mats.repeat([B, 1, 1, 1])
 
-    model = CamControl(dataset, C, arch='transformer').cuda()
+    model = CamControl(dataset, C, arch='conv').cuda()
     # state_dict = torch.load(
     #     '../../logs/carlax/RL_1_6dof+fix_moda_E_lr0.0001_stdtanhinit0.5wait10_ent0.001_regdecay0.1e10_cover0.0_divsteps1.0mu0.0_dir0.0_det_TASK_max_e30_2023-10-02_22-51-37/model.pth')
     # state_dict = {key.replace('control_module.', ''): value for key, value in state_dict.items() if
@@ -267,12 +273,14 @@ if __name__ == '__main__':
     # masked_location = torch.arange(N).repeat([B, 1]) > step[:, None]
     # heatmaps[masked_location] = -1
     # configs[masked_location] = -3
-    state = step.repeat(B), configs.repeat([B, 1, 1]).cuda(), imgs.repeat([B, 1, 1, 1, 1]).cuda(), \
-        aug_mats.repeat([B, 1, 1, 1]), proj_mats.repeat([B, 1, 1, 1])
-    action, value_, probs_, x_feat_ = model.get_action_and_value(state, visualize=True)
-    action, value, probs, x_feat = model.get_action_and_value(state, action)
-    (step, configs, img, aug_mat, proj_mat, world_gt, img_gt, frame), next_done = \
-        dataset.step(action.cpu().numpy()[0], visualize=True)
+    for cam in range(dataset.num_cam):
+        state = to_tensor(step).repeat(B), configs.cuda(), imgs.cuda(), aug_mats, proj_mats
+        action, value, probs, x_feat = model.get_action_and_value(state, visualize=True)
+        # (step, config, img, aug_mat, proj_mat, _, _, _), done = dataset.step(action.cpu().numpy()[0])
+        (step, config, img, aug_mat, proj_mat, _, _, _), done = dataset.step(
+            to_tensor(dataset.base.env.encode_camera_cfg(default_cfg[cam])) @ dataset.base.env.action2config.float())
+        configs[:, cam], aug_mats[:, cam], proj_mats[:, cam] = config, aug_mat, proj_mat
+        imgs[:, cam] = F.interpolate(img, scale_factor=1 / 10)
     # covermap, heatmap = model.feat_decoder(x_feat)
 
     # mu, sigma = torch.zeros([B, dataset.config_dim]), \

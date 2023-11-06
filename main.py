@@ -165,7 +165,7 @@ def main(args):
 
     if args.interactive:
         param_dicts = [{"params": [p for n, p in control_module.named_parameters()
-                                   if 'std' not in n and 'base' not in n and p.requires_grad],
+                                   if 'std' not in n and p.requires_grad],
                         "lr": args.control_lr, },
                        {"params": [p for n, p in control_module.named_parameters()
                                    if 'std' in n and p.requires_grad],
