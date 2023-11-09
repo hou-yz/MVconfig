@@ -143,7 +143,7 @@ class PerspectiveTrainer(object):
             if visualize:
                 Image.fromarray(cover_visualize(dataset, model_feat[0], world_heatmap[0], world_gt)
                                 ).save(f'{self.logdir}/cover_{batch_idx}.png')
-                save_image(make_grid(imgs[0], normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
+                save_image(make_grid(imgs[0], 4, normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
             return (model_feat.cpu(), (world_heatmap.detach().cpu(), world_offset.detach().cpu()),
                     ({key: value[None] for key, value in world_gt.items()},
                      {key: value[None] for key, value in imgs_gt.items()}))
@@ -422,17 +422,17 @@ class PerspectiveTrainer(object):
                                                                 dataset.action_names,
                                                                 self.args.div_xy_coef,
                                                                 self.args.div_yaw_coef, True)
-                # steps_mask = torch.arange(N).repeat([B, 1]) < b_step[mb_inds, None]
-                # if steps_mask.any():
-                #     steps_div = torch.clamp(action_dist[steps_mask], 0, self.args.div_clamp).mean()
-                # else:
-                #     steps_div = torch.zeros([]).cuda()
-                min_dist = torch.zeros([B]).cuda()
-                for b in range(B):
-                    step = b_step[mb_inds][b].item()
-                    if step > 0:
-                        min_dist[b] += torch.min(action_dist[b, :step])
-                steps_div = torch.clamp(min_dist, 0, self.args.div_clamp).mean()
+                steps_mask = torch.arange(N).repeat([B, 1]) < b_step[mb_inds, None]
+                if steps_mask.any():
+                    steps_div = torch.clamp(action_dist[steps_mask], 0, self.args.div_clamp).mean()
+                else:
+                    steps_div = torch.zeros([]).cuda()
+                # min_dist = torch.zeros([B]).cuda()
+                # for b in range(B):
+                #     step = b_step[mb_inds][b].item()
+                #     if step > 0:
+                #         min_dist[b] += torch.min(action_dist[b, :step])
+                # steps_div = torch.clamp(min_dist, 0, self.args.div_clamp).mean()
                 # make sure cameras won't look directly outside
                 delta_dir = torch.clamp((xy + 0.1 * delta_xy).norm(dim=-1) - xy.norm(dim=-1), 0, None).mean() / 0.1
                 # action diversity in terms of \mu
@@ -607,7 +607,7 @@ class PerspectiveTrainer(object):
                         Image.fromarray(cover_visualize(dataloader.dataset, feat[0], world_heatmap[0],
                                                         {key: value[0] for key, value in world_gt.items()})
                                         ).save(f'{self.logdir}/cover_{batch_idx}.png')
-                        save_image(make_grid(imgs[0], normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
+                        save_image(make_grid(imgs[0], 4, normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
                 # coverage
                 cam_coverages = feat.norm(dim=2).bool().float()
                 overall_coverages = cam_coverages.max(dim=1)[0].mean().item()
