@@ -271,9 +271,13 @@ class CarlaCameraSeqEnv(gym.Env):
         # https://github.com/carla-simulator/carla/issues/1207#issuecomment-470128947
         if RELOAD_WORLD_FREQ and self.total_episodes % RELOAD_WORLD_FREQ == 0 and self.total_episodes:
             print(f'reload world after {self.total_episodes} episodes ...')
+            if not self.interactive:
+                for cam in range(self.num_cam):
+                    self.cameras[cam].destroy()
             # Reload the current world, note that a new world is created with default settings using the same map.
             # All actors present in the world will be destroyed, but traffic manager instances will stay alive.
             self.world = self.client.reload_world(reset_settings=False)
+            self.cameras = {}
         self.total_episodes += 1
 
         observation = {
@@ -290,6 +294,11 @@ class CarlaCameraSeqEnv(gym.Env):
         # NOTE: Remember that Python only returns a reference to these objects
         # you may need to use copy.deepcopy() to avoid effects from further steps
         return observation, info
+
+    def close(self):
+        if not self.interactive:
+            for cam in self.num_cam:
+                self.cameras[cam].destroy()
 
     def spawn_and_render(self):
         # Reset the environment to its initial state and return the initial observation
