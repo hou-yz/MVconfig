@@ -260,14 +260,12 @@ class frameDataset(VisionDataset):
     def __getitem__(self, index=None, visualize=False):
         if self.base.__name__ == 'CarlaX':
             if index is not None:  # reset (remove) all pedestrians
-                self.base.env.reset(seed=self.fixed_seeds[index])
+                observation, info = self.base.env.reset(seed=self.fixed_seeds[index])
                 self.cur_frame = self.frames[index]
             else:
                 assert self.interactive
             if not self.interactive or index is None:  # only spawn pedestrian after interactive steps (index==None)
                 observation, info = self.base.env.spawn_and_render()
-            else:
-                observation, info = self.base.env.default_obs()
             # get camera matrices
             self.proj_mats = torch.stack([get_worldcoord_from_imgcoord_mat(self.base.env.camera_intrinsics[cam],
                                                                            self.base.env.camera_extrinsics[cam],
@@ -327,14 +325,14 @@ class frameDataset(VisionDataset):
             import cv2
             from matplotlib.patches import Circle
             fig, ax = plt.subplots(1)
-            ax.imshow(img)
-            for i in range(len(img_x_s)):
-                x, y = img_x_s[i], img_y_s[i]
-                if x > 0 and y > 0:
-                    ax.add_patch(Circle((x, y), 10))
-            plt.show()
-            plt.imshow(img_gt['heatmap'][0].numpy())
-            plt.show()
+            # ax.imshow(img)
+            # for i in range(len(img_x_s)):
+            #     x, y = img_x_s[i], img_y_s[i]
+            #     if x > 0 and y > 0:
+            #         ax.add_patch(Circle((x, y), 10))
+            # plt.show()
+            # plt.imshow(img_gt['heatmap'][0].numpy())
+            # plt.show()
             img0 = img.copy()
             for bbox in cam_img_bboxs:
                 bbox = tuple(int(pt) for pt in bbox)
@@ -347,21 +345,18 @@ class frameDataset(VisionDataset):
                                     reduce=self.world_reduce, top_k=self.top_k, kernel_size=self.world_kernel_size)
         if self.interactive:
             configs = to_tensor(list(configs.values()))
-            # IMPORTANT: mask out future steps
             if step_counter is not None:
+                # IMPORTANT: mask out future steps
                 padding_mask = torch.arange(self.num_cam) > step_counter - 1
                 configs[padding_mask] = CONFIGS_PADDING_VALUE
-            # initialization with no observation
-            if step_counter == 0 or step_counter is None:
-                # init/finish => return all cameras
-                if step_counter is None:
-                    step_counter = self.num_cam
-                pass
+                if step_counter != 0:
+                    # return only one camera
+                    cam = step_counter - 1
+                    imgs = {cam: imgs[cam]}
+                    configs = configs[[cam]]
             else:
-                # return only one camera
-                cam = step_counter - 1
-                imgs = {cam: imgs[cam]}
-                configs = configs[[cam]]
+                # finish => return all camera views
+                step_counter = self.num_cam
         else:
             step_counter = self.num_cam
             configs = torch.zeros([self.num_cam, 0])
@@ -412,13 +407,13 @@ if __name__ == '__main__':
     # torch.cuda.manual_seed(seed)
     # torch.cuda.manual_seed_all(seed)
 
-    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), augmentation='affine+color')
+    # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), augmentation='affine+color')
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
 
-    # with open('cfg/RL/town04crossroad.cfg', "r") as fp:
-    #     dataset_config = json.load(fp)
-    # dataset = frameDataset(CarlaX(dataset_config, port=2000, tm_port=8000, euler2vec='yaw'),
-    #                        interactive=False, seed=seed)
+    with open('cfg/RL/town04building.cfg', "r") as fp:
+        dataset_config = json.load(fp)
+    dataset = frameDataset(CarlaX(dataset_config, port=2300, tm_port=8300, euler2vec='yaw'),
+                           interactive=True, seed=seed)
     # min_dist = np.inf
     # for world_gt in dataset.world_gt.values():
     #     x, y = world_gt[0][:, 0], world_gt[0][:, 1]
