@@ -3,6 +3,7 @@ import numpy as np
 import cv2
 import re
 from torchvision.datasets import VisionDataset
+from src.parameters import *
 from src.environment.carla_gym_seq import CarlaCameraSeqEnv
 
 
@@ -15,7 +16,7 @@ class CarlaX(VisionDataset):
         # CarlaX has consistent unit: meter (m) for calibration & pos annotation
         self.__name__ = 'CarlaX'
         self.env = CarlaCameraSeqEnv(opts, port=port, tm_port=tm_port, euler2vec=euler2vec)
-        self.img_shape = [opts["cam_y"], opts["cam_x"]]  # H,W 
+        self.img_shape = [IMAGE_H, IMAGE_W]  # H,W
         x_min, x_max, y_min, y_max = opts["spawn_area"]
         # annotation accuracy of 2.5 cm, opts["map_expand"] = 40
         self.worldgrid_shape = [int((y_max - y_min) * opts["map_expand"]),

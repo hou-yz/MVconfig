@@ -35,8 +35,8 @@ def docker_run_carla(gpu=0, carla_port=2000):
     # wait for carla to start
     while container.status == "created":
         container.reload()
-        time.sleep(2)
-    time.sleep(15)
+        time.sleep(1)
+    time.sleep(30)
     return container
 
 
@@ -166,7 +166,7 @@ class CarlaCameraSeqEnv(gym.Env):
                                                        np.array(self.opts["cam_dir_lst"][cam]),
                                                        float(self.opts["cam_fov"]) * np.ones([1])])
             intrinsic, extrinsic = get_camera_config(*self.camera_configs[cam].tolist(),
-                                                     self.opts["cam_x"], self.opts["cam_y"])
+                                                     IMAGE_W, IMAGE_H)
             self.camera_intrinsics[cam] = intrinsic
             self.camera_extrinsics[cam] = extrinsic
             self.img_cam_buffer[cam] = Queue(maxsize=1)
@@ -176,13 +176,13 @@ class CarlaCameraSeqEnv(gym.Env):
         # avoid getting blueprints too often
         # https://github.com/carla-simulator/carla/issues/3197#issuecomment-1113692585
         self.camera_bp = self.world.get_blueprint_library().find("sensor.camera.rgb")
-        self.camera_bp.set_attribute("image_size_x", str(self.opts["cam_x"]))
-        self.camera_bp.set_attribute("image_size_y", str(self.opts["cam_y"]))
+        self.camera_bp.set_attribute("image_size_x", str(IMAGE_W))
+        self.camera_bp.set_attribute("image_size_y", str(IMAGE_H))
         self.camera_bp.set_attribute("fov", str(self.opts["cam_fov"]))
         self.pedestrian_bps = self.world.get_blueprint_library().filter("walker.pedestrian.*")
         self.walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
 
-        self.default_imgs = {cam: Image.fromarray(np.zeros([self.opts['cam_y'], self.opts['cam_x'], 3], dtype=np.uint8))
+        self.default_imgs = {cam: Image.fromarray(np.zeros([IMAGE_H, IMAGE_W, 3], dtype=np.uint8))
                              for cam in range(self.num_cam)}
 
     # action is for a SINGLE camera
@@ -274,11 +274,15 @@ class CarlaCameraSeqEnv(gym.Env):
             if not self.interactive:
                 for cam in range(self.num_cam):
                     self.cameras[cam].destroy()
+            time.sleep(1)
             # Reload the current world, note that a new world is created with default settings using the same map.
             # All actors present in the world will be destroyed, but traffic manager instances will stay alive.
             self.world = self.client.reload_world(reset_settings=False)
             self.cameras = {}
         self.total_episodes += 1
+
+        self.spawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
+                               motion=self.opts['motion'])
 
         observation = {
             "images": self.default_imgs,
@@ -297,13 +301,15 @@ class CarlaCameraSeqEnv(gym.Env):
 
     def close(self):
         if not self.interactive:
-            for cam in self.num_cam:
+            for cam in range(self.num_cam):
                 self.cameras[cam].destroy()
+            self.cameras = {}
 
     def spawn_and_render(self):
-        # Reset the environment to its initial state and return the initial observation
-        self.spawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
-                               motion=self.opts['motion'])
+        # spawn
+        if not self.interactive and (len(self.cameras) == 0):
+            for cam in range(self.num_cam):
+                self.spawn_camera(cam, self.camera_configs[cam])
 
         # NOTE: render all cameras by default
         observation = {
@@ -317,6 +323,7 @@ class CarlaCameraSeqEnv(gym.Env):
                 "camera_intrinsics": self.camera_intrinsics,
                 "camera_extrinsics": self.camera_extrinsics}  # Set any additional information
 
+        # destroy
         for pedestrian in self.pedestrians:
             if 'controller' in pedestrian:
                 ai_controller = self.world.get_actor(pedestrian['controller'])
@@ -325,8 +332,10 @@ class CarlaCameraSeqEnv(gym.Env):
             actor = self.world.get_actor(pedestrian['id'])
             actor.destroy()
         self.pedestrians = []
-        # NOTE: Remember that Python only returns a reference to these objects
-        # you may need to use copy.deepcopy() to avoid effects from further steps
+        if self.interactive:
+            for cam in range(self.num_cam):
+                self.cameras[cam].destroy()
+            self.cameras = {}
         return observation, info
 
     def step(self, action):
@@ -337,6 +346,8 @@ class CarlaCameraSeqEnv(gym.Env):
         cfg = self.action(action, cam).numpy()
         self.camera_configs[cam] = cfg
         self.spawn_camera(cam, cfg)
+
+        self.world.tick()
 
         self.step_counter += 1
         # Update the state, calculate the reward, and check for termination
@@ -366,13 +377,11 @@ class CarlaCameraSeqEnv(gym.Env):
         # Render the environment
         images = {}
         # start listening the camera images
-        do_spawn, do_destroy = not self.interactive and (len(self.cameras) == 0), self.interactive
         cams = list(range(self.num_cam))
         for cam in cams:
-            if do_spawn: self.spawn_camera(cam, self.camera_configs[cam])
             self.cameras[cam].listen(self.img_cam_buffer[cam].put)
 
-        # if do_spawn: time.sleep(SLEEP_TIME)
+        time.sleep(SLEEP_TIME)
         cur_frame = self.world.tick()
 
         # wait for sync until get all images
@@ -383,7 +392,6 @@ class CarlaCameraSeqEnv(gym.Env):
         # end listening
         for cam in cams:
             self.cameras[cam].stop()
-            if do_destroy: self.cameras[cam].destroy()
         return images
 
     def spawn_pedestrians(self, n_chatgroup=4, chatgroup_size=(2, 4), chatgroup_radius=(0.5, 1.5),
@@ -565,9 +573,9 @@ class CarlaCameraSeqEnv(gym.Env):
 
         # prepare 2D bbox
         x_max = 0
-        x_min = float(self.opts["cam_x"])
+        x_min = float(IMAGE_W)
         y_max = 0
-        y_min = float(self.opts["cam_y"])
+        y_min = float(IMAGE_H)
         for vert in verts:
             # convert vert to homogeneous coordinate, vert is a carla.Location
             vert_homo = np.array([vert.x, vert.y, vert.z, 1])
@@ -586,9 +594,9 @@ class CarlaCameraSeqEnv(gym.Env):
 
         if (
                 x_max > 100
-                and x_min < float(self.opts["cam_x"]) - 100
+                and x_min < float(IMAGE_W) - 100
                 and y_max > 100
-                and y_min < float(self.opts["cam_y"]) - 100
+                and y_min < float(IMAGE_H) - 100
         ):
             pedestrian_view = {"viewNum": cam, "xmin": x_min, "ymin": y_min, "xmax": x_max, "ymax": y_max, }
         else:
@@ -612,7 +620,7 @@ class CarlaCameraSeqEnv(gym.Env):
         # record camera related information
         # save camera configs, rather than projection matrices
         # projection/intrinsic/extrinsic matrices can be built from configs
-        intrinsic, extrinsic = get_camera_config(*cfg.tolist(), self.opts["cam_x"], self.opts["cam_y"])
+        intrinsic, extrinsic = get_camera_config(*cfg.tolist(), IMAGE_W, IMAGE_H)
         self.camera_intrinsics[cam] = intrinsic
         self.camera_extrinsics[cam] = extrinsic
 
