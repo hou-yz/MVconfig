@@ -165,8 +165,7 @@ class CarlaCameraSeqEnv(gym.Env):
             self.camera_configs[cam] = np.concatenate([np.array(self.opts["cam_pos_lst"][cam]),
                                                        np.array(self.opts["cam_dir_lst"][cam]),
                                                        float(self.opts["cam_fov"]) * np.ones([1])])
-            intrinsic, extrinsic = get_camera_config(*self.camera_configs[cam].tolist(),
-                                                     IMAGE_W, IMAGE_H)
+            intrinsic, extrinsic = get_camera_config(*self.camera_configs[cam].tolist(), IMAGE_W, IMAGE_H)
             self.camera_intrinsics[cam] = intrinsic
             self.camera_extrinsics[cam] = extrinsic
             self.img_cam_buffer[cam] = Queue(maxsize=1)
@@ -265,24 +264,25 @@ class CarlaCameraSeqEnv(gym.Env):
         self.random_generator = random.Random(seed)
         self.np_random_generator = np.random.default_rng(seed)
         self.pedestrians = []
+        self.cameras = {}
         self.step_counter = 0
 
         # reload world to clear up residue actors that got lost in the world
         # https://github.com/carla-simulator/carla/issues/1207#issuecomment-470128947
         if RELOAD_WORLD_FREQ and self.total_episodes % RELOAD_WORLD_FREQ == 0 and self.total_episodes:
             print(f'reload world after {self.total_episodes} episodes ...')
-            if not self.interactive:
-                for cam in range(self.num_cam):
-                    self.cameras[cam].destroy()
-            time.sleep(1)
+            # if not self.interactive:
+            #     for cam in range(self.num_cam):
+            #         self.cameras[cam].destroy()
+            # time.sleep(1)
             # Reload the current world, note that a new world is created with default settings using the same map.
             # All actors present in the world will be destroyed, but traffic manager instances will stay alive.
             self.world = self.client.reload_world(reset_settings=False)
-            self.cameras = {}
+            # self.cameras = {}
         self.total_episodes += 1
 
-        self.spawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
-                               motion=self.opts['motion'])
+        # self.spawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
+        #                        motion=self.opts['motion'])
 
         observation = {
             "images": self.default_imgs,
@@ -306,10 +306,12 @@ class CarlaCameraSeqEnv(gym.Env):
             self.cameras = {}
 
     def spawn_and_render(self):
-        # spawn
-        if not self.interactive and (len(self.cameras) == 0):
-            for cam in range(self.num_cam):
-                self.spawn_camera(cam, self.camera_configs[cam])
+        self.spawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
+                               motion=self.opts['motion'])
+        # # spawn
+        # if not self.interactive and (len(self.cameras) == 0):
+        #     for cam in range(self.num_cam):
+        #         self.spawn_camera(cam, self.camera_configs[cam])
 
         # NOTE: render all cameras by default
         observation = {
@@ -332,10 +334,10 @@ class CarlaCameraSeqEnv(gym.Env):
             actor = self.world.get_actor(pedestrian['id'])
             actor.destroy()
         self.pedestrians = []
-        if self.interactive:
-            for cam in range(self.num_cam):
-                self.cameras[cam].destroy()
-            self.cameras = {}
+        # if self.interactive:
+        #     for cam in range(self.num_cam):
+        #         self.cameras[cam].destroy()
+        #     self.cameras = {}
         return observation, info
 
     def step(self, action):
@@ -345,15 +347,16 @@ class CarlaCameraSeqEnv(gym.Env):
         cam = self.step_counter
         cfg = self.action(action, cam).numpy()
         self.camera_configs[cam] = cfg
-        self.spawn_camera(cam, cfg)
+        # self.spawn_camera(cam, cfg)
 
-        self.world.tick()
+        # self.world.tick()
 
         self.step_counter += 1
         # Update the state, calculate the reward, and check for termination
         # Set the current observation
         observation = {
-            "images": {cam: self.default_imgs[cam]},  # only render one camera for speed
+            # "images": {cam: self.default_imgs[cam]},  # only render one camera for speed
+            "images": self.render([cam, ]),  # only render one camera for speed
             "camera_configs": {cam_: self.encode_camera_cfg(self.camera_configs[cam_])
                                for cam_ in range(self.num_cam)},
             "step": self.step_counter
@@ -373,12 +376,13 @@ class CarlaCameraSeqEnv(gym.Env):
         # you may need to use copy.deepcopy() to avoid effects from further steps
         return observation, reward, done, info
 
-    def render(self):
+    def render(self, cams=None):
         # Render the environment
         images = {}
         # start listening the camera images
-        cams = list(range(self.num_cam))
+        if cams is None: cams = list(range(self.num_cam))
         for cam in cams:
+            self.spawn_camera(cam, self.camera_configs[cam])
             self.cameras[cam].listen(self.img_cam_buffer[cam].put)
 
         time.sleep(SLEEP_TIME)
@@ -392,6 +396,7 @@ class CarlaCameraSeqEnv(gym.Env):
         # end listening
         for cam in cams:
             self.cameras[cam].stop()
+            self.cameras[cam].destroy()
         return images
 
     def spawn_pedestrians(self, n_chatgroup=4, chatgroup_size=(2, 4), chatgroup_radius=(0.5, 1.5),

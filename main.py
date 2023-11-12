@@ -262,7 +262,7 @@ if __name__ == '__main__':
     # RL arguments
     parser.add_argument('--control_arch', type=str, default='encoder',
                         choices=['encoder', 'transformer', 'conv'])
-    parser.add_argument('--control_lr', type=float, default=2e-4, help='learning rate for MVcontrol')
+    parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
     parser.add_argument('--euler2vec', type=str, default='yaw')
     parser.add_argument("--action_mapping", type=str, default='clip', choices=['clip', 'tanh'])
     # https://arxiv.org/abs/2006.05990
@@ -270,9 +270,9 @@ if __name__ == '__main__':
     parser.add_argument("--reward", default='moda')
     # https://www.reddit.com/r/reinforcementlearning/comments/n09ns2/explain_why_ppo_fails_at_this_very_simple_task/
     # https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
-    parser.add_argument("--ppo_steps", type=int, default=512,
+    parser.add_argument("--ppo_steps", type=int, default=256,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
-    parser.add_argument("--rl_minibatch_size", type=int, default=64,
+    parser.add_argument("--rl_minibatch_size", type=int, default=32,
                         help="RL mini-batches, default: 64")
     parser.add_argument("--rl_update_epochs", type=int, default=5,
                         help="the K epochs to update the policy, default: 10")
