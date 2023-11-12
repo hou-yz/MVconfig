@@ -35,8 +35,8 @@ def docker_run_carla(gpu=0, carla_port=2000):
     # wait for carla to start
     while container.status == "created":
         container.reload()
-        time.sleep(1)
-    time.sleep(30)
+        time.sleep(2)
+    time.sleep(15)
     return container
 
 
@@ -181,6 +181,11 @@ class CarlaCameraSeqEnv(gym.Env):
         self.pedestrian_bps = self.world.get_blueprint_library().filter("walker.pedestrian.*")
         self.walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
 
+        for cam in range(self.num_cam):
+            self.spawn_camera(cam, self.camera_configs[cam])
+        time.sleep(1)
+        for _ in range(NUM_TICKS):
+            self.world.tick()
         self.default_imgs = {cam: Image.fromarray(np.zeros([IMAGE_H, IMAGE_W, 3], dtype=np.uint8))
                              for cam in range(self.num_cam)}
 
@@ -258,31 +263,39 @@ class CarlaCameraSeqEnv(gym.Env):
         cfg = cfg * self.use_default.to(device) + default_cfg * ~self.use_default.to(device)
         return cfg
 
-    def reset(self, seed=None, options=None):
+    def reset(self, seed=None):
         # if a new seed is provided, set generator to used new seed
         # otherwise use old seed
         self.random_generator = random.Random(seed)
         self.np_random_generator = np.random.default_rng(seed)
+
+        # Destroy existing actors, create new ones randomly
+        for pedestrian in self.pedestrians:
+            if 'controller' in pedestrian:
+                ai_controller = self.world.get_actor(pedestrian['controller'])
+                ai_controller.stop()
+                ai_controller.destroy()
+            actor = self.world.get_actor(pedestrian['id'])
+            actor.destroy()
         self.pedestrians = []
-        self.cameras = {}
         self.step_counter = 0
 
         # reload world to clear up residue actors that got lost in the world
         # https://github.com/carla-simulator/carla/issues/1207#issuecomment-470128947
         if RELOAD_WORLD_FREQ and self.total_episodes % RELOAD_WORLD_FREQ == 0 and self.total_episodes:
             print(f'reload world after {self.total_episodes} episodes ...')
-            # if not self.interactive:
-            #     for cam in range(self.num_cam):
-            #         self.cameras[cam].destroy()
-            # time.sleep(1)
+            for camera in self.cameras.values():
+                camera.destroy()
+            time.sleep(1)
             # Reload the current world, note that a new world is created with default settings using the same map.
             # All actors present in the world will be destroyed, but traffic manager instances will stay alive.
             self.world = self.client.reload_world(reset_settings=False)
-            # self.cameras = {}
+            for cam in range(self.num_cam):
+                self.spawn_camera(cam, self.camera_configs[cam])
+            time.sleep(1)
+            for _ in range(NUM_TICKS):
+                self.world.tick()
         self.total_episodes += 1
-
-        # self.spawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
-        #                        motion=self.opts['motion'])
 
         observation = {
             "images": self.default_imgs,
@@ -299,19 +312,16 @@ class CarlaCameraSeqEnv(gym.Env):
         # you may need to use copy.deepcopy() to avoid effects from further steps
         return observation, info
 
-    def close(self):
-        if not self.interactive:
-            for cam in range(self.num_cam):
-                self.cameras[cam].destroy()
-            self.cameras = {}
-
     def spawn_and_render(self):
         self.spawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
                                motion=self.opts['motion'])
-        # # spawn
-        # if not self.interactive and (len(self.cameras) == 0):
-        #     for cam in range(self.num_cam):
-        #         self.spawn_camera(cam, self.camera_configs[cam])
+        if self.interactive:
+            for cam in range(self.num_cam):
+                self.cameras[cam].destroy()
+                self.spawn_camera(cam, self.camera_configs[cam])
+        time.sleep(SLEEP_TIME)
+        for _ in range(NUM_TICKS):
+            self.world.tick()
 
         # NOTE: render all cameras by default
         observation = {
@@ -325,19 +335,6 @@ class CarlaCameraSeqEnv(gym.Env):
                 "camera_intrinsics": self.camera_intrinsics,
                 "camera_extrinsics": self.camera_extrinsics}  # Set any additional information
 
-        # destroy
-        for pedestrian in self.pedestrians:
-            if 'controller' in pedestrian:
-                ai_controller = self.world.get_actor(pedestrian['controller'])
-                ai_controller.stop()
-                ai_controller.destroy()
-            actor = self.world.get_actor(pedestrian['id'])
-            actor.destroy()
-        self.pedestrians = []
-        # if self.interactive:
-        #     for cam in range(self.num_cam):
-        #         self.cameras[cam].destroy()
-        #     self.cameras = {}
         return observation, info
 
     def step(self, action):
@@ -347,16 +344,16 @@ class CarlaCameraSeqEnv(gym.Env):
         cam = self.step_counter
         cfg = self.action(action, cam).numpy()
         self.camera_configs[cam] = cfg
-        # self.spawn_camera(cam, cfg)
-
-        # self.world.tick()
+        intrinsic, extrinsic = get_camera_config(*cfg.tolist(), IMAGE_W, IMAGE_H)
+        self.camera_intrinsics[cam] = intrinsic
+        self.camera_extrinsics[cam] = extrinsic
 
         self.step_counter += 1
         # Update the state, calculate the reward, and check for termination
         # Set the current observation
         observation = {
-            # "images": {cam: self.default_imgs[cam]},  # only render one camera for speed
-            "images": self.render([cam, ]),  # only render one camera for speed
+            "images": {cam: self.default_imgs[cam]},  # skip rendering for speed
+            # "images": self.render([cam, ]),  # only render one camera for speed
             "camera_configs": {cam_: self.encode_camera_cfg(self.camera_configs[cam_])
                                for cam_ in range(self.num_cam)},
             "step": self.step_counter
@@ -382,12 +379,9 @@ class CarlaCameraSeqEnv(gym.Env):
         # start listening the camera images
         if cams is None: cams = list(range(self.num_cam))
         for cam in cams:
-            self.spawn_camera(cam, self.camera_configs[cam])
             self.cameras[cam].listen(self.img_cam_buffer[cam].put)
-
-        time.sleep(SLEEP_TIME)
+        # time.sleep(SLEEP_TIME)
         cur_frame = self.world.tick()
-
         # wait for sync until get all images
         for cam in cams:
             image = self.img_cam_buffer[cam].get()
@@ -396,8 +390,20 @@ class CarlaCameraSeqEnv(gym.Env):
         # end listening
         for cam in cams:
             self.cameras[cam].stop()
-            self.cameras[cam].destroy()
         return images
+
+    def close(self):
+        # Clean up any resources or connections
+        # after capturing all frames, destroy all actors
+        for pedestrian in self.pedestrians:
+            if 'controller' in pedestrian:
+                ai_controller = self.world.get_actor(pedestrian['controller'])
+                ai_controller.stop()
+                ai_controller.destroy()
+            actor = self.world.get_actor(pedestrian['id'])
+            actor.destroy()
+        for camera in self.cameras.values():
+            camera.destroy()
 
     def spawn_pedestrians(self, n_chatgroup=4, chatgroup_size=(2, 4), chatgroup_radius=(0.5, 1.5),
                           n_walk=15, n_roam=0, percentagePedestriansRunning=0.2, motion=False):
@@ -621,13 +627,6 @@ class CarlaCameraSeqEnv(gym.Env):
         camera_init_trans = carla.Transform(loc, rot)
         # spawn the camera
         self.cameras[cam] = self.world.spawn_actor(self.camera_bp, camera_init_trans)
-
-        # record camera related information
-        # save camera configs, rather than projection matrices
-        # projection/intrinsic/extrinsic matrices can be built from configs
-        intrinsic, extrinsic = get_camera_config(*cfg.tolist(), IMAGE_W, IMAGE_H)
-        self.camera_intrinsics[cam] = intrinsic
-        self.camera_extrinsics[cam] = extrinsic
 
 
 def process_img(img):
