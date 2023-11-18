@@ -3,56 +3,27 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats as ss
 
-center = 0.5
+mu = 3.0
 # define x and y values to use for CDF
 f, (ax1, ax2) = plt.subplots(1, 2)
 x = np.linspace(-5, 5, 1000)
 
-cdf = ss.norm.cdf(x, loc=center, scale=2.0)
-# cdf[x < -1] = 0
-# cdf[x > 1] = 1
-pdf = np.gradient(cdf, np.tanh(x))
-ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 2.0)')
-ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 2.0)')
+for std in [2.0, 1.0, 0.7, 0.5, 0.2, 0.1]:
+    cdf = ss.norm.cdf(x, loc=mu, scale=std)
+    # cdf[x < -1] = 0
+    # cdf[x > 1] = 1
+    # pdf = np.gradient(cdf, x)
+    pdf = np.gradient(cdf, np.tanh(x))
+    ax1.plot(np.tanh(x), cdf, label=f'x~N({mu}, {std})')
+    ax2.plot(np.tanh(x), pdf, label=f'x~N({mu}, {std})')
 
-cdf = ss.norm.cdf(x, loc=center, scale=1.0)
-# cdf[x < -1] = 0
-# cdf[x > 1] = 1
-pdf = np.gradient(cdf, np.tanh(x))
-ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 1.0)')
-ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 1.0)')
-
-cdf = ss.norm.cdf(x, loc=center, scale=0.7)
-# cdf[x < -1] = 0
-# cdf[x > 1] = 1
-pdf = np.gradient(cdf, np.tanh(x))
-ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 0.7)')
-ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 0.7)')
-
-cdf = ss.norm.cdf(x, loc=center, scale=0.5)
-# cdf[x < -1] = 0
-# cdf[x > 1] = 1
-pdf = np.gradient(cdf, np.tanh(x))
-ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 0.5)')
-ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 0.5)')
-
-cdf = ss.norm.cdf(x, loc=center, scale=0.2)
-# cdf[x < -1] = 0
-# cdf[x > 1] = 1
-pdf = np.gradient(cdf, np.tanh(x))
-ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 0.2)')
-ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 0.2)')
-
-cdf = ss.norm.cdf(x, loc=center, scale=0.1)
-# cdf[x < -1] = 0
-# cdf[x > 1] = 1
-pdf = np.gradient(cdf, np.tanh(x))
-ax1.plot(np.tanh(x), cdf, label=f'x~N({center}, 0.1)')
-ax2.plot(np.tanh(x), pdf, label=f'x~N({center}, 0.1)')
-
+# ax1.set_xlabel('x')
+# ax1.set_ylabel("CDF(x)")
 ax1.set_xlabel('u=tanh(x)')
 ax1.set_ylabel("CDF(u)")
 ax1.legend()
+# ax2.set_xlabel('x')
+# ax2.set_ylabel("PDF(x)")
 ax2.set_xlabel('u=tanh(x)')
 ax2.set_ylabel("PDF(u)")
 ax2.set_ylim([0, 5])
