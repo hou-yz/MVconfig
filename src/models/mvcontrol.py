@@ -86,10 +86,12 @@ class CamControl(nn.Module):
                                              nn.Flatten(),
                                              nn.Linear(4 * math.prod(self.Rworld_shape), hidden_dim * 4), nn.ReLU(),
                                              nn.Linear(hidden_dim * 4, hidden_dim))
-        if self.arch == 'encoder' or self.arch == 'transformer':
-            self.config_branch = nn.Sequential(nn.Linear(dataset.config_dim, hidden_dim), nn.ReLU(),
-                                               nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-                                               nn.Linear(hidden_dim, hidden_dim))
+        if self.arch == 'encoder' or self.arch == 'transformer' or self.arch == 'linear':
+            self.config_branch = nn.Sequential(
+                nn.Linear(dataset.config_dim * (dataset.num_cam if self.arch == 'linear' else 1), hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim))
 
         # transformer
         # self.positional_embedding = create_pos_embedding(dataset.num_cam, hidden_dim)
@@ -104,6 +106,8 @@ class CamControl(nn.Module):
         elif self.arch == 'transformer':
             self.transformer = nn.Transformer(hidden_dim, 8, 3, 3, hidden_dim * 4, batch_first=True)
         elif self.arch == 'conv':
+            pass
+        elif self.arch == 'linear':
             pass
         else:
             raise Exception
@@ -183,9 +187,12 @@ class CamControl(nn.Module):
         # config branch
         if self.arch == 'encoder' or self.arch == 'transformer':
             x_config = self.config_branch(configs.flatten(0, 1)).unflatten(0, [B, N])
+            # B, N, C = x_config.shape
             x_config[padding_location] = self.padding_token  # tgt & query
             x_config[step_location] = self.cls_token[step]
             x_config = F.layer_norm(x_config, [x_config.shape[-1]])
+        elif self.arch == 'linear':
+            x_config = self.config_branch(configs.flatten(1, 2))
 
         # transformer
         # CHECK: batch_first=True for transformer
@@ -201,6 +208,8 @@ class CamControl(nn.Module):
             x = x[step_location]
         elif self.arch == 'conv':
             x = self.feat_branch(world_feat.max(dim=1)[0])
+        elif self.arch == 'linear':
+            x = x_config
         else:
             raise Exception
 
@@ -247,9 +256,9 @@ if __name__ == '__main__':
     yaw2 = torch.tensor([0, 15, 30, 60, 90, 150, 180, -120, -60, -180]) / 180
     dist_rot = dist_angle(yaw1[:, None], yaw2[None])
 
-    with open('../../cfg/RL/town04crossroad.cfg', "r") as fp:
+    with open('../../cfg/RL/town05market.cfg', "r") as fp:
         dataset_config = json.load(fp)
-    dataset = frameDataset(CarlaX(dataset_config, port=2100, tm_port=8100, euler2vec='yaw-pitch'), interactive=True,
+    dataset = frameDataset(CarlaX(dataset_config, port=2300, tm_port=8300, euler2vec='yaw-pitch'), interactive=True,
                            seed=0)
     default_cfg = copy.deepcopy(dataset.base.env.camera_configs)
     dataloader = DataLoader(dataset, 1, False, num_workers=0)
@@ -259,11 +268,9 @@ if __name__ == '__main__':
     configs = configs.repeat([B, 1, 1])
     aug_mats, proj_mats = aug_mats.repeat([B, 1, 1, 1]), proj_mats.repeat([B, 1, 1, 1])
 
-    model = CamControl(dataset, C, arch='conv').cuda()
+    model = CamControl(dataset, C, arch='encoder', actstd_init=0.5, use_tanh=True).cuda()
     # state_dict = torch.load(
-    #     '../../logs/carlax/RL_1_6dof+fix_moda_E_lr0.0001_stdtanhinit0.5wait10_ent0.001_regdecay0.1e10_cover0.0_divsteps1.0mu0.0_dir0.0_det_TASK_max_e30_2023-10-02_22-51-37/model.pth')
-    # state_dict = {key.replace('control_module.', ''): value for key, value in state_dict.items() if
-    #               'control_module' in key}
+    #     '../../logs/carlax/town05market_RL_fix_moda_E_steps512_b128_e10_lr0.0001_clip_ent0.001_cover0.0_divsteps0.1mu0.0_dir0.1_det_TASK_max_e50_2023-11-15_15-28-26/control_module.pth')
     # model.load_state_dict(state_dict)
     # model.eval()
     # heatmaps, configs, world_heatmap, step = (torch.randn([B, N, H, W]),
@@ -274,7 +281,7 @@ if __name__ == '__main__':
     # heatmaps[masked_location] = -1
     # configs[masked_location] = -3
     for cam in range(dataset.num_cam):
-        state = to_tensor(step).repeat(B), configs.cuda(), imgs.cuda(), aug_mats, proj_mats
+        state = to_tensor(step, dtype=torch.long).repeat(B), configs.cuda(), imgs.cuda(), aug_mats, proj_mats
         action, value, probs, x_feat = model.get_action_and_value(state, visualize=True)
         # (step, config, img, aug_mat, proj_mat, _, _, _), done = dataset.step(action.cpu().numpy()[0])
         (step, config, img, aug_mat, proj_mat, _, _, _), done = dataset.step(
