@@ -36,7 +36,7 @@ def docker_run_carla(gpu=0, carla_port=2000):
     while container.status == "created":
         container.reload()
         time.sleep(2)
-    time.sleep(15)
+    time.sleep(30)
     return container
 
 
@@ -155,12 +155,27 @@ class CarlaCameraSeqEnv(gym.Env):
         # set how many pedestrians can cross the road
         self.world.set_pedestrians_cross_factor(100.0)
 
+        # avoid getting blueprints too often
+        # https://github.com/carla-simulator/carla/issues/3197#issuecomment-1113692585
+        self.camera_bp = self.world.get_blueprint_library().find("sensor.camera.rgb")
+        self.camera_bp.set_attribute("image_size_x", str(IMAGE_W))
+        self.camera_bp.set_attribute("image_size_y", str(IMAGE_H))
+        self.camera_bp.set_attribute("fov", str(self.opts["cam_fov"]))
+        self.depth_camera_bp = self.world.get_blueprint_library().find("sensor.camera.depth")
+        self.depth_camera_bp.set_attribute("image_size_x", str(IMAGE_W))
+        self.depth_camera_bp.set_attribute("image_size_y", str(IMAGE_H))
+        self.depth_camera_bp.set_attribute("fov", str(self.opts["cam_fov"]))
+        self.pedestrian_bps = self.world.get_blueprint_library().filter("walker.pedestrian.*")
+        self.walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
+
         # world actors
         self.camera_configs = {}
         self.camera_intrinsics = {}
         self.camera_extrinsics = {}
         self.cameras = {}
+        self.depth_cameras = {}
         self.img_cam_buffer = {}
+        self.depth_cam_buffer = {}
         for cam in range(self.num_cam):
             self.camera_configs[cam] = np.concatenate([np.array(self.opts["cam_pos_lst"][cam]),
                                                        np.array(self.opts["cam_dir_lst"][cam]),
@@ -168,26 +183,18 @@ class CarlaCameraSeqEnv(gym.Env):
             intrinsic, extrinsic = get_camera_config(*self.camera_configs[cam].tolist(), IMAGE_W, IMAGE_H)
             self.camera_intrinsics[cam] = intrinsic
             self.camera_extrinsics[cam] = extrinsic
+            self.cameras[cam] = self.spawn_camera(self.camera_configs[cam])
             self.img_cam_buffer[cam] = Queue(maxsize=1)
+            self.depth_cam_buffer[cam] = Queue(maxsize=1)
         self.pedestrians = []
         self.pedestrian_gts = []
-
-        # avoid getting blueprints too often
-        # https://github.com/carla-simulator/carla/issues/3197#issuecomment-1113692585
-        self.camera_bp = self.world.get_blueprint_library().find("sensor.camera.rgb")
-        self.camera_bp.set_attribute("image_size_x", str(IMAGE_W))
-        self.camera_bp.set_attribute("image_size_y", str(IMAGE_H))
-        self.camera_bp.set_attribute("fov", str(self.opts["cam_fov"]))
-        self.pedestrian_bps = self.world.get_blueprint_library().filter("walker.pedestrian.*")
-        self.walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
-
-        for cam in range(self.num_cam):
-            self.spawn_camera(cam, self.camera_configs[cam])
         time.sleep(1)
         for _ in range(NUM_TICKS):
             self.world.tick()
         self.default_imgs = {cam: Image.fromarray(np.zeros([IMAGE_H, IMAGE_W, 3], dtype=np.uint8))
                              for cam in range(self.num_cam)}
+        self.default_depths = {cam: np.ones([IMAGE_H, IMAGE_W], dtype=np.float32)
+                               for cam in range(self.num_cam)}
 
     # action is for a SINGLE camera
     # convert cfg: location/rotation/fov from [-1, 1] to different ranges
@@ -291,7 +298,7 @@ class CarlaCameraSeqEnv(gym.Env):
             # All actors present in the world will be destroyed, but traffic manager instances will stay alive.
             self.world = self.client.reload_world(reset_settings=False)
             for cam in range(self.num_cam):
-                self.spawn_camera(cam, self.camera_configs[cam])
+                self.cameras[cam] = self.spawn_camera(self.camera_configs[cam])
             time.sleep(1)
             for _ in range(NUM_TICKS):
                 self.world.tick()
@@ -305,6 +312,7 @@ class CarlaCameraSeqEnv(gym.Env):
             "step": self.step_counter
         }
         info = {"pedestrian_gts": [],
+                "depths": {},
                 "camera_intrinsics": self.camera_intrinsics,
                 "camera_extrinsics": self.camera_extrinsics}  # Set any additional information
 
@@ -312,29 +320,37 @@ class CarlaCameraSeqEnv(gym.Env):
         # you may need to use copy.deepcopy() to avoid effects from further steps
         return observation, info
 
-    def spawn_and_render(self):
-        self.spawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
-                               motion=self.opts['motion'])
+    def spawn_and_render(self, use_depth=False):
+        if not use_depth:
+            self.spawn_pedestrians(n_chatgroup=self.opts['n_chatgroup'], n_walk=self.opts['n_walk'],
+                                   motion=self.opts['motion'])
         if self.interactive:
             for cam in range(self.num_cam):
                 self.cameras[cam].destroy()
-                self.spawn_camera(cam, self.camera_configs[cam])
+                self.cameras[cam] = self.spawn_camera(self.camera_configs[cam])
+                if use_depth:
+                    self.depth_cameras[cam] = self.spawn_camera(self.camera_configs[cam], type='depth')
         time.sleep(SLEEP_TIME)
         for _ in range(NUM_TICKS):
             self.world.tick()
 
         # NOTE: render all cameras by default
+        images, depth_images = self.render(use_depth=use_depth)
         observation = {
-            "images": self.render(),
+            "images": images,
             "camera_configs": {cam: self.encode_camera_cfg(self.camera_configs[cam])
                                for cam in range(self.num_cam)},
             "step": self.step_counter
         }
         self.update_pedestrian_gts()
         info = {"pedestrian_gts": self.pedestrian_gts,
+                "depths": depth_images,
                 "camera_intrinsics": self.camera_intrinsics,
                 "camera_extrinsics": self.camera_extrinsics}  # Set any additional information
 
+        if use_depth:
+            for cam in range(self.num_cam):
+                self.depth_cameras[cam].destroy()
         return observation, info
 
     def step(self, action):
@@ -366,6 +382,7 @@ class CarlaCameraSeqEnv(gym.Env):
         done = self.step_counter >= self.num_cam  # Set whether the episode has terminated or not
         # Set any additional information, the info can be used to calculate reward outside gym env
         info = {"pedestrian_gts": [],
+                "depths": {},
                 "camera_intrinsics": self.camera_intrinsics,
                 "camera_extrinsics": self.camera_extrinsics, }
 
@@ -373,13 +390,16 @@ class CarlaCameraSeqEnv(gym.Env):
         # you may need to use copy.deepcopy() to avoid effects from further steps
         return observation, reward, done, info
 
-    def render(self, cams=None):
+    def render(self, cams=None, use_depth=False):
         # Render the environment
         images = {}
+        depth_images = {}
         # start listening the camera images
         if cams is None: cams = list(range(self.num_cam))
         for cam in cams:
             self.cameras[cam].listen(self.img_cam_buffer[cam].put)
+            if use_depth:
+                self.depth_cameras[cam].listen(self.depth_cam_buffer[cam].put)
         # time.sleep(SLEEP_TIME)
         cur_frame = self.world.tick()
         # wait for sync until get all images
@@ -387,10 +407,22 @@ class CarlaCameraSeqEnv(gym.Env):
             image = self.img_cam_buffer[cam].get()
             assert image.frame == cur_frame
             images[cam] = process_img(image)
+            if use_depth:
+                depth_image = self.depth_cam_buffer[cam].get()
+                assert depth_image.frame == cur_frame
+                # option 1
+                depth_images[cam] = depth_to_array(depth_image) * 1000
+                # option 2
+                # https://carla.org/Doxygen/html/df/df7/ColorConverter_8h_source.html
+                # depth_image.convert(carla.ColorConverter.Depth)
+                # depth_images[cam] = np.array(depth_image.raw_data).reshape(
+                #     (depth_image.height, depth_image.width, 4))[:, :, 0] * 1000 / 255
         # end listening
         for cam in cams:
             self.cameras[cam].stop()
-        return images
+            if use_depth:
+                self.depth_cameras[cam].stop()
+        return images, depth_images
 
     def close(self):
         # Clean up any resources or connections
@@ -616,17 +648,18 @@ class CarlaCameraSeqEnv(gym.Env):
 
         return pedestrian_view
 
-    def spawn_camera(self, cam, cfg):
+    def spawn_camera(self, cfg, type='rgb'):
         location, rotation, fov = cfg[:3], cfg[3:6], cfg[6]
-
-        if float(fov) != float(self.camera_bp.get_attribute("fov")):
+        if type == 'rgb':
             self.camera_bp.set_attribute("fov", str(fov))
+        else:
+            self.depth_camera_bp.set_attribute("fov", str(fov))
         loc = carla.Location(*location.tolist())
         # cam_dir=[yaw, pitch, roll], carla.Rotation([pitch, yaw, roll])
         rot = carla.Rotation(*rotation[[1, 0, 2]].tolist())
         camera_init_trans = carla.Transform(loc, rot)
         # spawn the camera
-        self.cameras[cam] = self.world.spawn_actor(self.camera_bp, camera_init_trans)
+        return self.world.spawn_actor(self.camera_bp if type == 'rgb' else self.depth_camera_bp, camera_init_trans)
 
 
 def process_img(img):
@@ -635,6 +668,36 @@ def process_img(img):
     img_bgra = np.reshape(np.copy(img.raw_data), (img.height, img.width, 4))
     img_rgb = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2RGB)
     return img_rgb
+
+
+# https://github.com/carla-simulator/carla/issues/219#issuecomment-365679978
+# https://github.com/carla-simulator/carla/blob/69f7e8ea68046340b1174e8c867381721852b8e1/PythonClient/carla/image_converter.py
+def to_bgra_array(image):
+    """Convert a CARLA raw image to a BGRA numpy array."""
+    array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
+    array = np.reshape(array, (image.height, image.width, 4))
+    return array
+
+
+def to_rgb_array(image):
+    """Convert a CARLA raw image to a RGB numpy array."""
+    array = to_bgra_array(image)
+    # Convert BGRA to RGB.
+    array = array[:, :, :3]
+    array = array[:, :, ::-1].copy()
+    return array
+
+
+def depth_to_array(image):
+    """
+    Convert an image containing CARLA encoded depth-map to a 2D array containing
+    the depth value of each pixel normalized between [0.0, 1.0].
+    """
+    array = to_bgra_array(image)
+    array = array.astype(np.float32)
+    # Apply (R + G * 256 + B * 256 * 256) / (256 * 256 * 256 - 1).
+    grayscale = np.dot(array[:, :, :3], [256.0 * 256.0, 256.0, 1.0]) / (256.0 * 256.0 * 256.0 - 1.0)
+    return grayscale
 
 
 def get_camera_config(x, y, z, yaw, pitch, roll, fov, image_w, image_h):

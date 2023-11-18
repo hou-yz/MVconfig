@@ -37,7 +37,7 @@ def cover_visualize(dataset, model_feat, world_heatmap, world_gt):
     ax = fig.add_axes([0, 0, 1, 1])
     ax.axis('off')
     ax.imshow(avg_covermap + torch.sigmoid(world_heatmap[0].detach().cpu()), vmin=0, vmax=2)
-    ax.scatter(pedestrian_gt_ij[1], pedestrian_gt_ij[0], 4, 'orange', alpha=0.7)
+    ax.scatter(pedestrian_gt_ij[1], pedestrian_gt_ij[0], 6, 'orange', alpha=0.7)
     # https://stackoverflow.com/a/7821917/8305276
     # If we haven't already shown or saved the plot, then we need to
     # draw the figure first...
@@ -76,10 +76,16 @@ class PerspectiveTrainer(object):
         # beta distribution in agent will output [0, 1], whereas the env has action space of [-1, 1]
         # self.action_mapping = lambda x: torch.clamp(x, -1, 1)
         # self.action_mapping = torch.tanh
+        self.best_action = None
+        self.best_episodic_return = 0
 
         # filter out visible locations
         xx, yy = np.meshgrid(np.arange(0, model.Rworld_shape[1]), np.arange(0, model.Rworld_shape[0]))
-        self.unit_world_grids = torch.tensor(np.stack([xx, yy], axis=2), dtype=torch.float).flatten(0, 1)
+        # self.unit_world_grids = torch.tensor(np.stack([xx, yy], axis=2), dtype=torch.float).flatten(0, 1)
+        self.unit_world_grids = F.interpolate(torch.tensor(np.stack([xx, yy]), dtype=torch.float)[None],
+                                              scale_factor=1 / self.args.visibility_reduce)[0]
+        self.unit_world_grids = torch.cat([self.unit_world_grids,
+                                           torch.ones([1, *self.unit_world_grids.shape[1:]])]).flatten(1).cuda()
 
     def action_mapping(self, action):
         if self.args.action_mapping == 'clip':
@@ -94,7 +100,7 @@ class PerspectiveTrainer(object):
         return action
 
     # https://github.com/vwxyzjn/ppo-implementation-details
-    def expand_episode(self, dataset, init_obs, training=False, visualize=False, batch_idx=0):
+    def expand_episode(self, dataset, init_obs, training=False, visualize=False, batch_idx=0, override_action=None):
         step, configs, imgs, aug_mats, proj_mats = init_obs
         B, N, _ = configs.shape
         imgs = F.interpolate(imgs.flatten(0, 1), scale_factor=1 / 10).unflatten(0, [B, N])
@@ -106,12 +112,16 @@ class PerspectiveTrainer(object):
         action_history = []
         while not next_done:
             # step 0 ~ N-1: action
-            with torch.no_grad():
-                action, value, probs, _ = self.agent.get_action_and_value(
-                    (step, configs.cuda(), imgs.cuda(), aug_mats, proj_mats),
-                    deterministic=self.args.rl_deterministic and not training)
+            if override_action is not None:
+                action = override_action[step]
+            else:
+                with torch.no_grad():
+                    action, value, probs, _ = self.agent.get_action_and_value(
+                        (step, configs.cuda(), imgs.cuda(), aug_mats, proj_mats),
+                        deterministic=self.args.rl_deterministic and not training)
             if training:
                 self.rl_global_step += 1 * B
+            if training and override_action is None:
                 # Markovian if have (obs_heatmaps, configs, step) as state
                 # only store cam_heatmap (one cam) instead of obs_heatmaps (all cams) to save memory
                 self.memory_bank['obs'].append((step,
@@ -125,7 +135,7 @@ class PerspectiveTrainer(object):
 
             (step, config, img, aug_mat, proj_mat, _, _, _), next_done = \
                 dataset.step(self.action_mapping(action[0]).cpu())
-            if training:
+            if training and override_action is None:
                 self.memory_bank['dones'].append(next_done)
             cam = step - 1
             step = to_tensor(step, dtype=torch.long)[None]
@@ -133,7 +143,8 @@ class PerspectiveTrainer(object):
             imgs[:, cam] = F.interpolate(img, scale_factor=1 / 10)
             action_history.append(action.cpu())
         # step N (step range is 0 ~ N-1 so this is after done=True): calculate rewards
-        (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) = dataset.__getitem__()
+        (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) = \
+            dataset.__getitem__(use_depth=self.args.reward == 'visibility')
         imgs = to_tensor(imgs)[None]
         aug_mats, proj_mats = to_tensor(aug_mats)[None], to_tensor(proj_mats)[None]
         model_feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
@@ -143,38 +154,42 @@ class PerspectiveTrainer(object):
             if visualize:
                 Image.fromarray(cover_visualize(dataset, model_feat[0], world_heatmap[0], world_gt)
                                 ).save(f'{self.logdir}/cover_{batch_idx}.png')
-                save_image(make_grid(imgs[0], 4, normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
+                save_image(make_grid(imgs[0], 6, normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
             return (model_feat.cpu(), (world_heatmap.detach().cpu(), world_offset.detach().cpu()),
                     ({key: value[None] for key, value in world_gt.items()},
                      {key: value[None] for key, value in imgs_gt.items()}))
 
-        rewards, stats = self.rl_rewards(
-            dataset, action_history, model_feat[0].cpu(), (world_heatmap, world_offset), world_gt, frame)
+        rewards, stats = self.rl_rewards(dataset, action_history, model_feat[0].cpu(), (world_heatmap, world_offset),
+                                         world_gt, frame, proj_mats, imgs_gt)
         coverages, task_loss, moda, min_dist = stats
+        if rewards.sum().item() > self.best_episodic_return:
+            self.best_episodic_return = rewards.sum().item()
+            self.best_action = torch.cat(action_history)
         # fixed episode length of num_cam - 1 so no need for value bootstrap
         returns, advantages = np.zeros([N]), np.zeros([N])
-        values = np.array(self.memory_bank['values'][-N:])
-        lastgaelam = 0
-        for t in range(-1, -(N + 1), -1):
-            nextnonterminal = 1.0 - self.memory_bank['dones'][t]
-            if t == -1:  # last item [-1]
-                next_value = next_return = 0
-            else:  # second and third last item [-2], [-3], ...
-                next_value = values[t + 1]
-                next_return = returns[t + 1]
-            if self.args.gae:
-                delta = rewards[t] + self.args.gamma * next_value * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = \
-                    delta + self.args.gamma * self.args.gae_lambda * nextnonterminal * lastgaelam
-                returns[t] = advantages[t] + values[t]
-            else:
-                returns[t] = rewards[t] + self.args.gamma * nextnonterminal * next_return
-                advantages[t] = returns[t] - values[t]
-        for t in range(N):
-            self.memory_bank['rewards'].append(float(rewards[t]))
-            self.memory_bank['advantages'].append(float(advantages[t]))
-            self.memory_bank['returns'].append(float(returns[t]))
-        self.memory_bank['world_gt'].append(world_gt)
+        if override_action is None:
+            values = np.array(self.memory_bank['values'][-N:])
+            lastgaelam = 0
+            for t in range(-1, -(N + 1), -1):
+                nextnonterminal = 1.0 - self.memory_bank['dones'][t]
+                if t == -1:  # last item [-1]
+                    next_value = next_return = 0
+                else:  # second and third last item [-2], [-3], ...
+                    next_value = values[t + 1]
+                    next_return = returns[t + 1]
+                if self.args.gae:
+                    delta = rewards[t] + self.args.gamma * next_value * nextnonterminal - values[t]
+                    advantages[t] = lastgaelam = \
+                        delta + self.args.gamma * self.args.gae_lambda * nextnonterminal * lastgaelam
+                    returns[t] = advantages[t] + values[t]
+                else:
+                    returns[t] = rewards[t] + self.args.gamma * nextnonterminal * next_return
+                    advantages[t] = returns[t] - values[t]
+            for t in range(N):
+                self.memory_bank['rewards'].append(float(rewards[t]))
+                self.memory_bank['advantages'].append(float(advantages[t]))
+                self.memory_bank['returns'].append(float(returns[t]))
+            self.memory_bank['world_gt'].append(world_gt)
 
         if self.writer is not None:
             self.writer.add_scalar("charts/episodic_return", rewards.sum().item(), self.rl_global_step)
@@ -182,7 +197,7 @@ class PerspectiveTrainer(object):
             self.writer.add_scalar("charts/coverage", coverages[-1].item(), self.rl_global_step)
             self.writer.add_scalar("charts/action_dist", min_dist.mean().item(), self.rl_global_step)
             self.writer.add_scalar("charts/loss", task_loss, self.rl_global_step)
-            self.writer.add_scalar("charts/moda", moda.item(), self.rl_global_step)
+            self.writer.add_scalar("charts/moda", moda, self.rl_global_step)
             if visualize:
                 self.writer.add_image("images/coverage",
                                       cover_visualize(dataset, model_feat[0], world_heatmap[0], world_gt),
@@ -207,7 +222,7 @@ class PerspectiveTrainer(object):
         return torch.cat(action_means)
 
     # https://github.com/vwxyzjn/ppo-implementation-details
-    def rl_rewards(self, dataset, action_history, model_feat, world_res, world_gt, frame):
+    def rl_rewards(self, dataset, action_history, model_feat, world_res, world_gt, frame, proj_mats, imgs_gt):
         # coverage
         # N + 1, H, W
         N = dataset.num_cam
@@ -259,6 +274,31 @@ class PerspectiveTrainer(object):
         # encourage each action to be more dis-similar
         if 'div' in self.args.reward:
             rewards += min_dist * 0.01
+        if 'visibility' in self.args.reward:
+            # visibility
+            proj_mats_ = to_tensor(dataset.Rworldgrid_from_worldcoord)[None] @ proj_mats.flatten(0, 1)
+            proj_imgs_points = (torch.inverse(proj_mats_.cuda()) @ self.unit_world_grids).permute([0, 2, 1]).cpu()
+            proj_imgs_points[..., :2] /= proj_imgs_points[..., [2]]
+            world_point_visibility = torch.zeros(proj_imgs_points.shape[:2])
+            for cam in range(N):
+                for i in range(self.unit_world_grids.shape[1]):
+                    u, v, d = proj_imgs_points[cam, i]
+                    if u > 0 and u < dataset.img_shape[1] and v > 0 and v < dataset.img_shape[0]:
+                        u_, v_, d_ = int(u), int(v), d.item()
+                        d_img = imgs_gt['depth'][cam, 0, v_, u_]
+                        if np.abs(d_img - d_) < d_img * 0.1 + 0.5:  # error tolerance in meters
+                            world_point_visibility[cam, i] = 1
+                # fig = plt.figure(figsize=tuple(np.array(dataset.Rworld_shape)[::-1] / 50))
+                # ax = fig.add_axes([0, 0, 1, 1])
+                # ax.axis('off')
+                # ax.imshow(world_point_visibility[cam].unflatten(0, list(
+                #     map(lambda x: int(x / self.args.visibility_reduce), dataset.Rworld_shape))))
+                # plt.savefig(f'cam{cam}_visibility.png')
+                pass
+            # rewards += world_point_visibility.mean(dim=1)
+            mean_visibility = [world_point_visibility[:cam + 1].max(dim=0)[0].mean().item() for cam in range(N)]
+            mean_visibility = to_tensor([0] + mean_visibility)
+            rewards += mean_visibility[1:] - mean_visibility[:-1]
 
         return rewards, (overall_coverages, task_loss.item(), moda, min_dist)
 
@@ -464,8 +504,8 @@ class PerspectiveTrainer(object):
                     print('**************** inf loss ****************')
                     print(pg_loss, v_loss, entropy_loss, steps_div, mu_div, delta_dir, recons_loss)
                 # fix the action_std for the initial epochs
-                optimizer.param_groups[-1]['lr'] = (epoch_ > self.args.std_wait_epochs) * \
-                                                   self.args.control_lr * self.args.std_lr_ratio
+                # optimizer.param_groups[-1]['lr'] = (epoch_ > self.args.std_wait_epochs) * \
+                #                                    self.args.control_lr * self.args.std_lr_ratio
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.agent.parameters(), self.args.max_grad_norm)
@@ -529,7 +569,9 @@ class PerspectiveTrainer(object):
                 self.agent.eval()
                 feat, (world_heatmap, world_offset), (world_gt, imgs_gt) = self.expand_episode(
                     dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
-                    True, visualize=self.rl_global_step % 500 == 0)
+                    True, visualize=self.rl_global_step % 500 == 0,
+                    override_action=(torch.rand([N, len(dataloader.dataset.action_names)]) * 2 - 1
+                                     if self.args.random_search else None))
             else:
                 (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = \
                     self.model(imgs.cuda(), aug_mats, proj_mats)
@@ -564,7 +606,7 @@ class PerspectiveTrainer(object):
             optimizers[0].step()
 
             # train MVcontrol
-            if len(self.memory_bank['obs']) >= self.args.ppo_steps:  # or batch_idx + 1 == len(dataloader)
+            if len(self.memory_bank['obs']) >= self.args.ppo_steps:
                 self.train_rl(dataloader.dataset, optimizers[1], epoch)
 
             for scheduler in schedulers:
@@ -585,7 +627,9 @@ class PerspectiveTrainer(object):
                 scheduler.step()
         return losses / len(dataloader), None
 
-    def test(self, dataloader):
+    def test(self, dataloader, override_action=None, visualize=False):
+        if override_action is not None:
+            print(override_action)
         self.model.eval()
         t0 = time.time()
         losses = 0
@@ -599,15 +643,15 @@ class PerspectiveTrainer(object):
                     assert B == 1, 'only support batch_size/num_envs == 1'
                     feat, (world_heatmap, world_offset), (world_gt, imgs_gt) = self.expand_episode(
                         dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
-                        visualize=(batch_idx < 5), batch_idx=batch_idx)
+                        visualize=(batch_idx < 5), batch_idx=batch_idx, override_action=override_action)
                 else:
                     feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
                     world_heatmap, world_offset = self.model.get_output(feat.cuda())
-                    if batch_idx < 5:
+                    if batch_idx < 5 and visualize:
                         Image.fromarray(cover_visualize(dataloader.dataset, feat[0], world_heatmap[0],
                                                         {key: value[0] for key, value in world_gt.items()})
                                         ).save(f'{self.logdir}/cover_{batch_idx}.png')
-                        save_image(make_grid(imgs[0], 4, normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
+                        save_image(make_grid(imgs[0], 6, normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
                 # coverage
                 cam_coverages = feat.norm(dim=2).bool().float()
                 overall_coverages = cam_coverages.max(dim=1)[0].mean().item()

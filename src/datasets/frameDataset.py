@@ -6,7 +6,7 @@ import random
 from operator import itemgetter
 from PIL import Image
 import matplotlib.pyplot as plt
-from kornia.geometry import warp_perspective
+from kornia.geometry import warp_affine, warp_perspective
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -257,7 +257,7 @@ class frameDataset(VisionDataset):
         Rworldgrid_from_imgcoord = Rworldgrid_from_worldcoord @ worldcoord_from_imgcoord
         return Rworldgrid_from_imgcoord
 
-    def __getitem__(self, index=None, visualize=False):
+    def __getitem__(self, index=None, visualize=False, use_depth=False):
         if self.base.__name__ == 'CarlaX':
             if index is not None:  # reset (remove) all pedestrians
                 observation, info = self.base.env.reset(seed=self.fixed_seeds[index])
@@ -265,7 +265,8 @@ class frameDataset(VisionDataset):
             else:
                 assert self.interactive
             if not self.interactive or index is None:  # only spawn pedestrian after interactive steps (index==None)
-                observation, info = self.base.env.spawn_and_render()
+                use_depth = ('train' in self.split) and use_depth
+                observation, info = self.base.env.spawn_and_render(use_depth)
             # get camera matrices
             self.proj_mats = torch.stack([get_worldcoord_from_imgcoord_mat(self.base.env.camera_intrinsics[cam],
                                                                            self.base.env.camera_extrinsics[cam],
@@ -275,6 +276,7 @@ class frameDataset(VisionDataset):
             imgs = observation["images"]
             configs = observation["camera_configs"]
             step_counter = observation["step"] if index is not None else None  # init/finish => return all cameras
+            depths = info["depths"]
             world_pts, world_lwh, world_pids, img_bboxs, img_pids = self.get_carla_gt_targets(info["pedestrian_gts"])
             world_pts = world_pts.reshape([-1, 2]) if world_pts.size == 0 else world_pts
 
@@ -287,9 +289,11 @@ class frameDataset(VisionDataset):
                     for cam in range(self.num_cam)}
             configs = None
             step_counter = None
+            depths = {}
             img_bboxs, img_pids = zip(*self.imgs_gt[frame].values())
             world_pts, world_pids = self.world_gt[frame]
-        return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, visualize)
+        return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, depths,
+                               visualize)
 
     def get_gt_array(self, frames=None):
         if self.base.__name__ == 'CarlaX':
@@ -316,11 +320,14 @@ class frameDataset(VisionDataset):
         imgs = observation["images"]
         configs = observation["camera_configs"]
         step_counter = observation["step"]
+        depths = {}
         world_pts, world_lwh, world_pids, img_bboxs, img_pids = self.get_carla_gt_targets(info["pedestrian_gts"])
         world_pts = world_pts.reshape([-1, 2]) if world_pts.size == 0 else world_pts
-        return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, visualize), done
+        return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, depths,
+                               visualize), done
 
-    def prepare_gt(self, imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, visualize=False):
+    def prepare_gt(self, imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, depths,
+                   visualize=False):
         def plt_visualize():
             import cv2
             from matplotlib.patches import Circle
@@ -381,10 +388,16 @@ class frameDataset(VisionDataset):
             # TODO: check the difference between different dataloader iteration
             if visualize:
                 plt_visualize()
+                # if len(depths):
+                #     plt.imshow(depths[cam])
+                #     plt.show()
 
         aug_imgs = torch.stack(aug_imgs)
         aug_mats = torch.stack(aug_mats)
         aug_imgs_gt = {key: torch.stack([img_gt[key] for img_gt in aug_imgs_gt]) for key in aug_imgs_gt[0]}
+        if len(depths):
+            assert 'affine' not in self.augmentation
+            aug_imgs_gt['depth'] = to_tensor(np.array(list(depths.values()))[:, None])
         return (step_counter, configs, aug_imgs, aug_mats, self.proj_mats[list(imgs.keys())],
                 world_gt, aug_imgs_gt, self.cur_frame)
 
@@ -412,7 +425,7 @@ if __name__ == '__main__':
 
     with open('cfg/RL/town04building.cfg', "r") as fp:
         dataset_config = json.load(fp)
-    dataset = frameDataset(CarlaX(dataset_config, port=2300, tm_port=8300, euler2vec='yaw'),
+    dataset = frameDataset(CarlaX(dataset_config, port=2300, tm_port=8300, euler2vec='yaw', use_depth=True),
                            interactive=True, seed=seed)
     # min_dist = np.inf
     # for world_gt in dataset.world_gt.values():

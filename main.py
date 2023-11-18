@@ -60,7 +60,7 @@ def main(args):
 
     # dataset
     if args.dataset == 'carlax':
-        carla_container = docker_run_carla(args.carla_gpu, args.carla_port)
+        carla_container = docker_run_carla(args.carla_gpu, args.carla_port) if not is_debug else None
         with open(f'./cfg/RL/{args.carla_cfg}.cfg', "r") as fp:
             dataset_config = json.load(fp)
         base = CarlaX(dataset_config, port=args.carla_port, tm_port=args.carla_tm_port, euler2vec=args.euler2vec)
@@ -73,9 +73,11 @@ def main(args):
             args.lr *= 0.1
             if not args.joint_training:
                 args.base_lr_ratio = args.other_lr_ratio = 0
+        if args.random_search:
+            args.action_mapping = 'clip'
         X0, X1, Y0, Y1 = dataset_config['camera_range'][:4]
-        x0, x1, y0, y1 = dataset_config['spawn_area']
-        args.div_xy_coef *= np.array([X1 - X0, Y1 - Y0]) / ((X1 - X0) * (Y1 - Y0)) ** 0.5
+        # x0, x1, y0, y1 = dataset_config['spawn_area']
+        args.div_xy_coef *= np.array([X1 - X0, Y1 - Y0]) / 20
     else:
         # args.augmentation += '+color'
         if args.dataset == 'wildtrack':
@@ -105,11 +107,12 @@ def main(args):
                              pin_memory=True, worker_init_fn=seed_worker)
 
     # logging
-    RL_settings = f'RL_fix_{args.reward}_{"J_" if args.joint_training else ""}{args.control_arch[0].upper()}_' \
-                  f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_' \
-                  f'{args.action_mapping}_ent{args.ent_coef}_' \
-                  f'cover{args.cover_coef}_divsteps{args.steps_div_coef}mu{args.mu_div_coef}_dir{args.dir_coef}_' \
-                  f'{"det_" if args.rl_deterministic else ""}' if args.interactive else ''
+    RL_settings = (f'{"random" if args.random_search else "RL"}_fix_{args.reward}_{"J_" if args.joint_training else ""}'
+                   f'{args.control_arch[0].upper()}_'
+                   f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_'
+                   f'{args.action_mapping}_ent{args.ent_coef}_'
+                   f'cover{args.cover_coef}_divsteps{args.steps_div_coef}mu{args.mu_div_coef}_dir{args.dir_coef}_'
+                   f'{"det_" if args.rl_deterministic else ""}' if args.interactive else '')
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}' \
              f'{f"{args.carla_cfg}_{RL_settings}" if args.dataset == "carlax" else ""}' \
              f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
@@ -147,6 +150,8 @@ def main(args):
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
         if args.interactive:
+            if args.resume:
+                control_module.load_state_dict(torch.load(f'logs/{args.dataset}/{args.resume}/control_module.pth'))
             if not is_debug:
                 # tensorboard logging
                 writer = SummaryWriter(logdir)
@@ -163,7 +168,7 @@ def main(args):
                    ]
     optimizer_model = optim.Adam(param_dicts, args.lr, weight_decay=args.weight_decay)
 
-    if args.interactive:
+    if args.interactive and not args.random_search:
         param_dicts = [{"params": [p for n, p in control_module.named_parameters()
                                    if 'std' not in n and 'base' not in n and p.requires_grad],
                         "lr": args.control_lr, },
@@ -195,13 +200,15 @@ def main(args):
     test_prec_s = []
 
     # learn
+    use_best_action = args.random_search or args.reward == 'visibility'
     if not args.eval:
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
             train_loss, train_prec = trainer.train(epoch, train_loader, (optimizer_model, optimizer_agent),
                                                    (scheduler_model, scheduler_agent))
             print('Testing...')
-            test_loss, test_prec = trainer.test(test_loader)
+            test_loss, test_prec = trainer.test(test_loader, trainer.best_action if use_best_action else None,
+                                                visualize=True)
 
             # draw & save
             x_epoch.append(epoch)
@@ -211,7 +218,7 @@ def main(args):
             test_prec_s.append(test_prec[0])
             draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s,
                        train_prec_s, test_prec_s)
-            if args.interactive:
+            if args.interactive and not args.random_search:
                 torch.save(control_module.state_dict(), os.path.join(logdir, 'control_module.pth'))
             if not args.interactive or args.joint_training:
                 torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
@@ -219,9 +226,13 @@ def main(args):
     print('Test loaded model...')
     print(logdir)
     trainer.test(test_loader)
+    # if args.interactive:
+    #     print('Test recorded best...')
+    #     trainer.test(test_loader, trainer.best_action)
     if args.dataset == 'carlax':
         base.env.close()
-        carla_container.stop()
+        if not is_debug:
+            carla_container.stop()
     if args.interactive and not is_debug:
         writer.close()
     if not args.interactive and not args.eval:
@@ -260,21 +271,24 @@ if __name__ == '__main__':
     parser.add_argument('--carla_tm_port', type=int, default=8000)
     parser.add_argument('--carla_gpu', type=int, default=0)
     # RL arguments
+    parser.add_argument('--random_search', action='store_true')
     parser.add_argument('--control_arch', type=str, default='encoder',
-                        choices=['encoder', 'transformer', 'conv'])
+                        choices=['encoder', 'transformer', 'conv', 'linear'])
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
     parser.add_argument('--euler2vec', type=str, default='yaw')
     parser.add_argument("--action_mapping", type=str, default='clip', choices=['clip', 'tanh'])
     # https://arxiv.org/abs/2006.05990
     parser.add_argument('--actstd_init', type=float, default=0.5, help='initial value actor std')
     parser.add_argument("--reward", default='moda')
+    parser.add_argument("--visibility_reduce", type=float, default=5)
     # https://www.reddit.com/r/reinforcementlearning/comments/n09ns2/explain_why_ppo_fails_at_this_very_simple_task/
     # https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
-    parser.add_argument("--ppo_steps", type=int, default=256,
+    # https://www.reddit.com/r/reinforcementlearning/comments/nr3weg/ppo_stuck_in_local_optimum/
+    parser.add_argument("--ppo_steps", type=int, default=512,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
-    parser.add_argument("--rl_minibatch_size", type=int, default=32,
+    parser.add_argument("--rl_minibatch_size", type=int, default=128,
                         help="RL mini-batches, default: 64")
-    parser.add_argument("--rl_update_epochs", type=int, default=5,
+    parser.add_argument("--rl_update_epochs", type=int, default=10,
                         help="the K epochs to update the policy, default: 10")
     parser.add_argument('--gamma', type=float, default=0.99, help='reward discount factor, default: 0.99')
     parser.add_argument("--gae", type=str2bool, default=True,

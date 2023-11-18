@@ -20,6 +20,8 @@ def evaluateDetection_py(det, gt, frames=None):
         gt = np.loadtxt(gt)
     else:
         gt = np.array(gt)
+    if gt.size == 0:
+        return 0, 0, 0, 0, (0, 0, 0, 0, 0)
     if isinstance(det, str):
         det = np.loadtxt(det)
     else:
