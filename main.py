@@ -226,9 +226,9 @@ def main(args):
     print('Test loaded model...')
     print(logdir)
     trainer.test(test_loader)
-    # if args.interactive:
-    #     print('Test recorded best...')
-    #     trainer.test(test_loader, trainer.best_action)
+    if args.interactive:
+        print('Test recorded best...')
+        trainer.test(test_loader, trainer.best_action)
     if args.dataset == 'carlax':
         base.env.close()
         if not is_debug:
