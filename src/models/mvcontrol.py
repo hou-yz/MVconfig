@@ -13,8 +13,9 @@ from torchvision.models.efficientnet import efficientnet_b0
 from torchvision.utils import make_grid, save_image
 from src.models.multiview_base import aggregate_feat, cover_mean, cover_mean_std
 from src.utils.image_utils import img_color_denormalize, array2heatmap
-from src.utils.tensor_utils import to_tensor
+from src.utils.tensor_utils import to_tensor, dclamp
 from src.utils.projection import project_2d_points
+from src.parameters import *
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -58,7 +59,7 @@ class ConvDecoder(nn.Module):
 
 
 class CamControl(nn.Module):
-    def __init__(self, dataset, hidden_dim, actstd_init=1.0, arch='encoder', use_tanh=False):
+    def __init__(self, dataset, hidden_dim, actstd_init=1.0, arch='encoder', use_tanh=False, trig_yaw_coef=1.0):
         super().__init__()
         self.world_reduce, self.img_reduce = 40, 120
         self.Rworld_shape = tuple(map(lambda x: x // self.world_reduce, dataset.worldgrid_shape))
@@ -66,6 +67,17 @@ class CamControl(nn.Module):
                                                         np.diag([self.world_reduce, self.world_reduce, 1]))
         self.action_names = dataset.action_names
         self.arch = arch
+        self.use_tanh = use_tanh
+        self.trig_yaw_coef = trig_yaw_coef
+        # self.other_idx = list(range(len(dataset.action_names)))
+        if 'dir_x' in self.action_names and 'dir_y' in self.action_names:
+            self.trig_yaw_idx = [self.action_names.index('dir_x'), self.action_names.index('dir_y')]
+            # self.other_idx.remove(self.action_names.index('dir_x'))
+            # self.other_idx.remove(self.action_names.index('dir_y'))
+        else:
+            self.trig_yaw_idx = []
+        self.trig_yaw_idx = F.one_hot(torch.tensor(self.trig_yaw_idx), len(dataset.action_names)).sum(dim=0).bool()
+        # self.other_idx = F.one_hot(torch.tensor(self.other_idx), len(dataset.action_names)).sum(dim=0).bool()
 
         if self.arch == 'conv' or self.arch == 'transformer':
             # filter out visible locations
@@ -117,8 +129,7 @@ class CamControl(nn.Module):
         self.critic = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
                                     layer_init(nn.Linear(hidden_dim, 1), std=1.0))
         self.actor_mean = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
-                                        layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01),
-                                        nn.Tanh() if use_tanh else nn.Identity())
+                                        layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01))
         # self.actor_std = nn.Sequential(layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
         #                                layer_init(nn.Linear(hidden_dim, len(self.action_names)), std=0.01))
         self.actor_std = nn.Parameter(torch.zeros([len(dataset.action_names)]))
@@ -130,10 +141,11 @@ class CamControl(nn.Module):
 
     def get_action_and_value(self, state, action=None, deterministic=False, visualize=False):
         step, configs, imgs, aug_mats, proj_mats = state
-        B, N, _, H, W = imgs.shape
+        B, N, _ = configs.shape
+        device = configs.device
 
-        padding_location = (torch.arange(N).repeat([B, 1]) >= step[:, None]).to(imgs.device)
-        step_location = (torch.arange(N).repeat([B, 1]) == step[:, None]).to(imgs.device)
+        padding_location = (torch.arange(N).repeat([B, 1]) >= step[:, None]).to(device)
+        step_location = (torch.arange(N).repeat([B, 1]) == step[:, None]).to(device)
 
         # feature branch
         if self.arch == 'conv' or self.arch == 'transformer':
@@ -148,13 +160,13 @@ class CamControl(nn.Module):
                         proj_mats[:, :N].flatten(0, 1) @ \
                         imgcoord_from_Rimggrid_mat
 
-            visible_mask = project_2d_points(torch.inverse(proj_mats).to(imgs.device),
-                                             self.unit_world_grids.to(imgs.device),
+            visible_mask = project_2d_points(torch.inverse(proj_mats).to(device),
+                                             self.unit_world_grids.to(device),
                                              check_visible=True)[1].view([B, N, *self.Rworld_shape])
 
             if visualize:
                 denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-                proj_imgs = warp_perspective(F.interpolate(imgs, scale_factor=1 / 8), proj_mats.to(imgs.device),
+                proj_imgs = warp_perspective(F.interpolate(imgs, scale_factor=1 / 8), proj_mats.to(device),
                                              self.Rworld_shape).unflatten(0, [B, N]) * \
                             visible_mask[:, :, None] * ~padding_location[..., None, None, None]
                 # for cam in range(N):
@@ -171,7 +183,7 @@ class CamControl(nn.Module):
 
             imgs_feat = self.base(imgs)
             imgs_feat = self.bottleneck(imgs_feat)
-            world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device), self.Rworld_shape).unflatten(0, [B, N])
+            world_feat = warp_perspective(imgs_feat, proj_mats.to(device), self.Rworld_shape).unflatten(0, [B, N])
             world_feat *= visible_mask[:, :, None] * ~padding_location[..., None, None, None]
 
             # if visualize:
@@ -215,7 +227,12 @@ class CamControl(nn.Module):
 
         # output head
         action_mean = self.actor_mean(x)
-        action_std = F.softplus(torch.clamp(self.actor_std + np.log(np.exp(self.actstd_init) - 1), -5, None))
+        action_std = F.softplus(self.actor_std + np.log(np.exp(self.actstd_init) - 1))
+        # other action dimensions
+        if self.use_tanh:
+            action_mean = F.tanh(action_mean)
+            # trig yaw
+            action_mean = (self.trig_yaw_coef * self.trig_yaw_idx + ~self.trig_yaw_idx).to(device) * action_mean
         if deterministic:
             # remove randomness during evaluation when deterministic=True
             return action_mean, self.critic(x), None, None
@@ -226,6 +243,20 @@ class CamControl(nn.Module):
         if action is None:
             action = probs.sample()
         return action, self.critic(x), probs, None
+
+    def expand_mean_actions(self, dataset, ):
+        configs = torch.ones([1, dataset.num_cam, dataset.config_dim]).cuda() * CONFIGS_PADDING_VALUE
+        action_history = []
+        for cam in range(dataset.num_cam):
+            # step 0 ~ N-1: action
+            with torch.no_grad():
+                action, _, _, _ = self.get_action_and_value((torch.tensor([cam]), configs, None, None, None),
+                                                            deterministic=True)
+            action_history.append(action.cpu())
+            token_location = (torch.arange(dataset.num_cam).repeat([1, 1]) == cam).cuda()
+            new_config = dataset.base.env.encode_camera_cfg(dataset.base.env.action(action[0], cam))
+            configs = new_config * token_location[..., None] + configs * ~token_location[..., None]
+        return torch.cat(action_history)
 
 
 if __name__ == '__main__':

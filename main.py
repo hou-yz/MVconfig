@@ -110,8 +110,7 @@ def main(args):
     RL_settings = (f'{"random" if args.random_search else "RL"}_fix_{args.reward}_{"J_" if args.joint_training else ""}'
                    f'{args.control_arch[0].upper()}_'
                    f'steps{args.ppo_steps}_b{args.rl_minibatch_size}_e{args.rl_update_epochs}_lr{args.control_lr}_'
-                   f'{args.action_mapping}_ent{args.ent_coef}_'
-                   f'cover{args.cover_coef}_divsteps{args.steps_div_coef}mu{args.mu_div_coef}_dir{args.dir_coef}_'
+                   f'{args.action_mapping}_ent{args.ent_coef}_stdinit{args.actstd_init}_'
                    f'{"det_" if args.rl_deterministic else ""}' if args.interactive else '')
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}' \
              f'{f"{args.carla_cfg}_{RL_settings}" if args.dataset == "carlax" else ""}' \
@@ -133,7 +132,8 @@ def main(args):
     model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim,
                   args.dropout, check_visible=args.interactive).cuda()
     control_module = CamControl(train_set, args.hidden_dim, args.actstd_init, args.control_arch,
-                                use_tanh=args.action_mapping == 'clip').cuda() if args.interactive else None
+                                use_tanh=args.action_mapping == 'clip', trig_yaw_coef=args.div_yaw_coef
+                                ).cuda() if args.interactive else None
 
     # load checkpoint
     writer = None
@@ -225,6 +225,8 @@ def main(args):
 
     print('Test loaded model...')
     print(logdir)
+    if args.interactive:
+        print(control_module.expand_mean_actions(test_set))
     trainer.test(test_loader)
     if args.interactive:
         print('Test recorded best...')
@@ -276,7 +278,7 @@ if __name__ == '__main__':
                         choices=['encoder', 'transformer', 'conv', 'linear'])
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
     parser.add_argument('--euler2vec', type=str, default='yaw')
-    parser.add_argument("--action_mapping", type=str, default='clip', choices=['clip', 'tanh'])
+    parser.add_argument("--action_mapping", type=str, default='tanh', choices=['clip', 'tanh'])
     # https://arxiv.org/abs/2006.05990
     parser.add_argument('--actstd_init', type=float, default=0.5, help='initial value actor std')
     parser.add_argument("--reward", default='moda')
@@ -284,6 +286,7 @@ if __name__ == '__main__':
     # https://www.reddit.com/r/reinforcementlearning/comments/n09ns2/explain_why_ppo_fails_at_this_very_simple_task/
     # https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
     # https://www.reddit.com/r/reinforcementlearning/comments/nr3weg/ppo_stuck_in_local_optimum/
+    # https://github.com/Unity-Technologies/ml-agents/blob/c0889d5183411c393fa96387ff6cbb6ca5f1172a/config/ppo/Hallway.yaml
     parser.add_argument("--ppo_steps", type=int, default=512,
                         help="the number of steps to run in each environment per policy rollout, default: 2048")
     parser.add_argument("--rl_minibatch_size", type=int, default=128,
@@ -293,11 +296,11 @@ if __name__ == '__main__':
     parser.add_argument('--gamma', type=float, default=0.99, help='reward discount factor, default: 0.99')
     parser.add_argument("--gae", type=str2bool, default=True,
                         help="Use GAE for advantage computation")
-    parser.add_argument("--gae_lambda", type=float, default=0.9,
+    parser.add_argument("--gae_lambda", type=float, default=0.95,
                         help="the lambda for the general advantage estimation")
     parser.add_argument("--norm_adv", type=str2bool, default=True,
                         help="Toggles advantages normalization")
-    parser.add_argument("--clip_coef", type=float, default=0.25,
+    parser.add_argument("--clip_coef", type=float, default=0.2,
                         help="the surrogate clipping coefficient")
     parser.add_argument("--clip_vloss", type=str2bool, default=False,
                         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")

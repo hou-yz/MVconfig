@@ -208,19 +208,6 @@ class PerspectiveTrainer(object):
         return model_feat, (world_heatmap, world_offset), ({key: value[None] for key, value in world_gt.items()},
                                                            {key: value[None] for key, value in imgs_gt.items()})
 
-    def expand_mean_actions(self, dataset, ):
-        configs = torch.ones([1, dataset.num_cam, dataset.config_dim]).cuda() * CONFIGS_PADDING_VALUE
-        action_means = []
-        for cam in range(dataset.num_cam):
-            # step 0 ~ N-1: action
-            action, _, _, _ = self.agent.get_action_and_value((None, configs, None, torch.tensor([cam])),
-                                                              deterministic=True)
-            token_location = (torch.arange(dataset.num_cam).repeat([1, 1]) == cam).cuda()
-            new_config = dataset.base.env.encode_camera_cfg(dataset.base.env.action(action[0].detach(), cam))
-            configs = new_config * token_location[..., None] + configs * ~token_location[..., None]
-            action_means.append(action)
-        return torch.cat(action_means)
-
     # https://github.com/vwxyzjn/ppo-implementation-details
     def rl_rewards(self, dataset, action_history, model_feat, world_res, world_gt, frame, proj_mats, imgs_gt):
         # coverage
@@ -302,6 +289,46 @@ class PerspectiveTrainer(object):
 
         return rewards, (overall_coverages, task_loss.item(), moda, min_dist)
 
+    def get_advantages(self, b_step, b_configs, b_imgs, b_aug_mats, b_proj_mats,
+                       b_actions, b_rewards, b_dones, b_imgs_inds):
+        self.agent.eval()
+        L, = b_step.shape
+        B = self.args.rl_minibatch_size
+        b_advantages = torch.zeros_like(b_rewards)
+        b_returns = torch.zeros_like(b_rewards)
+        b_values = []
+        b_inds = torch.arange(L)
+        with torch.no_grad():
+            for start in range(0, L, B):  # drop_last=False
+                end = min(start + B, L)
+                mb_inds = b_inds[start:end]
+                _, mb_values, _, _ = self.agent.get_action_and_value(
+                    (b_step[mb_inds],
+                     b_configs[mb_inds].cuda(),
+                     b_imgs[b_imgs_inds[mb_inds]].cuda(),
+                     b_aug_mats[mb_inds],
+                     b_proj_mats[mb_inds]),
+                    b_actions[mb_inds].cuda())
+                b_values.append(mb_values.cpu())
+            b_values = torch.cat(b_values).squeeze(1)
+            # fixed episode length of num_cam - 1 so no need for value bootstrap
+            if self.args.gae:
+                lastgaelam = 0
+                for t in reversed(range(L)):
+                    nextnonterminal = 1.0 - b_dones[t]
+                    nextvalues = 0 if t == L - 1 else b_values[t + 1]
+                    delta = b_rewards[t] + self.args.gamma * nextvalues * nextnonterminal - b_values[t]
+                    b_advantages[t] = lastgaelam = delta + self.args.gamma * self.args.gae_lambda * \
+                                                   nextnonterminal * lastgaelam
+                    b_returns[t] = b_advantages[t] + b_values[t]
+            else:
+                for t in reversed(range(L)):
+                    nextnonterminal = 1.0 - b_dones[t]
+                    next_return = 0 if t == L - 1 else b_returns[t + 1]
+                    b_returns[t] = b_rewards[t] + self.args.gamma * nextnonterminal * next_return
+                    b_advantages[t] = b_returns[t] - b_values[t]
+        return b_advantages, b_returns
+
     def train_rl(self, dataset, optimizer, epoch_):
         # flatten the batch
         b_step, b_configs, b_imgs, b_aug_mats, b_proj_mats = [], [], [], [], []
@@ -364,41 +391,8 @@ class PerspectiveTrainer(object):
         # Optimizing the policy and value network
         for rl_epoch in range(self.args.rl_update_epochs):
             # re-calculate advantages
-            self.agent.eval()
-            b_advantages = torch.zeros_like(b_rewards)
-            b_returns = torch.zeros_like(b_rewards)
-            b_values = []
-            b_inds = torch.arange(L)
-            with torch.no_grad():
-                for start in range(0, L, B):  # drop_last=False
-                    end = min(start + B, L)
-                    mb_inds = b_inds[start:end]
-                    _, mb_values, _, _ = self.agent.get_action_and_value(
-                        (b_step[mb_inds],
-                         b_configs[mb_inds].cuda(),
-                         b_imgs[b_imgs_inds[mb_inds]].cuda(),
-                         b_aug_mats[mb_inds],
-                         b_proj_mats[mb_inds]),
-                        b_actions[mb_inds].cuda())
-                    b_values.append(mb_values.cpu())
-                b_values = torch.cat(b_values).squeeze(1)
-                # fixed episode length of num_cam - 1 so no need for value bootstrap
-                if self.args.gae:
-                    lastgaelam = 0
-                    for t in reversed(range(L)):
-                        nextnonterminal = 1.0 - b_dones[t]
-                        nextvalues = 0 if t == L - 1 else b_values[t + 1]
-                        delta = b_rewards[t] + self.args.gamma * nextvalues * nextnonterminal - b_values[t]
-                        b_advantages[t] = lastgaelam = delta + self.args.gamma * self.args.gae_lambda * \
-                                                       nextnonterminal * lastgaelam
-                        b_returns[t] = b_advantages[t] + b_values[t]
-                else:
-                    for t in reversed(range(L)):
-                        nextnonterminal = 1.0 - b_dones[t]
-                        next_return = 0 if t == L - 1 else b_returns[t + 1]
-                        b_returns[t] = b_rewards[t] + self.args.gamma * nextnonterminal * next_return
-                        b_advantages[t] = b_returns[t] - b_values[t]
-
+            b_advantages, b_returns = self.get_advantages(b_step, b_configs, b_imgs, b_aug_mats, b_proj_mats,
+                                                          b_actions, b_rewards, b_dones, b_imgs_inds)
             # train agent
             self.agent.train()
             b_inds = torch.randperm(L)
@@ -492,9 +486,14 @@ class PerspectiveTrainer(object):
                 # overall_heatmap = F.interpolate(b_world_heatmap[mb_inds], covermap_recons.shape[-2:])
                 # recons_loss = F.binary_cross_entropy(torch.sigmoid(covermap_recons), overall_covermap.float()) + \
                 #               ((torch.sigmoid(heatmap_recons) - overall_heatmap).abs() * overall_covermap).mean()
+
+                # regularization for absolute values
+                tanh_abs_mean = torch.abs(torch.tanh(probs.loc) if not self.agent.use_tanh else probs.loc)
+                tanh_abs_loss = torch.clamp(tanh_abs_mean - 0.99, 0).mean() * 100
+
                 loss = (pg_loss - self.args.ent_coef * entropy_loss + v_loss * self.args.vf_coef) * self.args.use_ppo + \
                        (-steps_div * self.args.steps_div_coef - mu_div * self.args.mu_div_coef +
-                        delta_dir * self.args.dir_coef + recons_loss * self.args.autoencoder_coef
+                        delta_dir * self.args.dir_coef + recons_loss * self.args.autoencoder_coef + tanh_abs_loss
                         ) * self.args.reg_decay_factor ** ((epoch_ - 1) // self.args.reg_decay_epochs)
 
                 if torch.isnan(loss):
@@ -510,6 +509,15 @@ class PerspectiveTrainer(object):
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.agent.parameters(), self.args.max_grad_norm)
                 optimizer.step()
+                grad_norm = 0
+                for p in self.agent.parameters():
+                    param_norm = p.grad.data.norm(2)
+                    grad_norm += param_norm.item() ** 2
+                grad_norm = grad_norm ** (1. / 2)
+
+                # with torch.no_grad():
+                #     for param in self.agent.parameters():
+                #         param.clamp_(-1, 1)
 
             if self.args.target_kl is not None:
                 if approx_kl > self.args.target_kl:
@@ -533,14 +541,16 @@ class PerspectiveTrainer(object):
             self.writer.add_scalar("losses/mu_div", mu_div.item(), self.rl_global_step)
             self.writer.add_scalar("losses/delta_dir", delta_dir.item(), self.rl_global_step)
             self.writer.add_scalar("losses/recons_loss", recons_loss.item(), self.rl_global_step)
+            self.writer.add_scalar("losses/grad_norm", grad_norm, self.rl_global_step)
 
         with np.printoptions(formatter={'float': '{: 0.3f}'.format}):
+            action_means = self.agent.expand_mean_actions(dataset)
             # action_space = dataset.base.env.opts['env_action_space'].split('-')
             print(f'v loss: {v_loss.item():.3f}, p loss: {pg_loss.item():.3f}, ent: {entropy_loss.item():.3f}, '
                   f'avg return: {b_returns.mean().item():.3f}\n'
-                  f'sigma: {probs.scale.detach().cpu().mean(dim=0).numpy()}\n'
-                  f'steps div: {steps_div.item():.3f}, mu div: {mu_div.item():.3f}, delta dir: {delta_dir.item():.3f}, '
-                  f'recons loss: {recons_loss.item():.3f}')
+                  f'mu: {action_means.detach().cpu().numpy()}\n'
+                  f'sigma: {probs.scale.detach().cpu().mean(dim=0).numpy()}'
+                  )
             # if torch.where(b_step[mb_inds] == 0)[0].numel():
             #     idx = torch.where(b_step[mb_inds] == 0)[0][0].item()
             #     mu = probs.loc.detach().cpu().numpy()

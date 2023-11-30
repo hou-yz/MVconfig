@@ -294,6 +294,8 @@ class CarlaCameraSeqEnv(gym.Env):
             for camera in self.cameras.values():
                 camera.destroy()
             time.sleep(1)
+            for _ in range(NUM_TICKS):
+                self.world.tick()
             # Reload the current world, note that a new world is created with default settings using the same map.
             # All actors present in the world will be destroyed, but traffic manager instances will stay alive.
             self.world = self.client.reload_world(reset_settings=False)
