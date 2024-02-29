@@ -25,7 +25,6 @@ def docker_run_carla(gpu=0, carla_port=2000):
     container = client.containers.run("carlasim/carla:0.9.14",
                                       command=f'/bin/bash ./CarlaUE4.sh -RenderOffScreen -carla-rpc-port={carla_port}',
                                       detach=True,
-                                      privileged=True,
                                       network_mode="host",
                                       environment={},
                                       volumes={'/tmp/.X11-unix': {'bind': '/tmp/.X11-unix', 'mode': 'rw'}},
