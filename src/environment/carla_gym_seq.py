@@ -166,6 +166,11 @@ class CarlaCameraSeqEnv(gym.Env):
         self.depth_camera_bp.set_attribute("fov", str(self.opts["cam_fov"]))
         self.pedestrian_bps = self.world.get_blueprint_library().filter("walker.pedestrian.*")
         self.walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
+        
+        # Randomly permute the pedestrian_bps list use the given random seed
+        # Whether to use deepcopy here is fine, as we are not modifying inner attributes
+        self.pedestrian_bps_indices = list(range(len(self.pedestrian_bps)))
+        random.Random(None).shuffle(self.pedestrian_bps_indices)
 
         # world actors
         self.camera_configs = {}
@@ -274,6 +279,11 @@ class CarlaCameraSeqEnv(gym.Env):
         # otherwise use old seed
         self.random_generator = random.Random(seed)
         self.np_random_generator = np.random.default_rng(seed)
+
+        # Randomly permute the pedestrian_bps list use the given random seed
+        # Whether to use deepcopy here is fine, as we are not modifying inner attributes
+        self.pedestrian_bps_indices = list(range(len(self.pedestrian_bps)))
+        random.Random(seed).shuffle(self.pedestrian_bps_indices)
 
         # Destroy existing actors, create new ones randomly
         for pedestrian in self.pedestrians:
@@ -491,13 +501,31 @@ class CarlaCameraSeqEnv(gym.Env):
                 spawn_points['walk'].append(spawn_point)
             else:
                 spawn_points['roam'].append(spawn_point)
+
         # 2. we spawn the walker object
+        # For the sake of pedestrian re-ID, we also need to remember the blueprint of each pedestrian
+        # We index first k pedestrian_bps for initializing pedestrians based on these blueprints
+        counter = 0
+        break_outer_loop = False
+
+        bp_ids = []
         batch = []
         walker_speed = []
         types = []
         for pattern in spawn_points.keys():
             for spawn_point in spawn_points[pattern]:
-                walker_bp = self.random_generator.choice(self.pedestrian_bps)
+                # Check if we already used all the blueprints, if yes, we need to stop,
+                # just wait here to jump out of the both loops
+                if counter >= len(self.pedestrian_bps_indices):
+                    print("Not enough pedestrian blueprints to spawn, skip further spawning!!!")
+                    break_outer_loop = True
+                    break
+
+                # Choose the blueprint by iterate through indices of the permutated list
+                # which guarantees the randomness
+                bp_id = self.pedestrian_bps_indices[counter]
+                walker_bp = self.pedestrian_bps[bp_id]
+
                 # make sure all pedestrians are vincible
                 if walker_bp.has_attribute("is_invincible"):
                     walker_bp.set_attribute("is_invincible", "false")
@@ -513,6 +541,12 @@ class CarlaCameraSeqEnv(gym.Env):
                         walker_speed.append(float(walker_bp.get_attribute('speed').recommended_values[2]))
                 batch.append(carla.command.SpawnActor(walker_bp, spawn_point))
                 types.append(pattern)
+                bp_ids.append(bp_id)
+                counter += 1
+
+            if break_outer_loop:
+                break
+
         # apply spawn pedestrian
         # BUG FIX: make sure that 'apply_batch_sync' will not do another tick()
         results = self.client.apply_batch_sync(batch, do_tick=False)
@@ -520,6 +554,7 @@ class CarlaCameraSeqEnv(gym.Env):
             if not results[i].error:
                 # if error happens, very likely to be spawning failure caused by collision
                 self.pedestrians.append({'id': results[i].actor_id,
+                                         'bp_id': bp_ids[i],
                                          'type': types[i],
                                          'speed': walker_speed[i]})
         # print(f"{len(self.pedestrians)} pedestrians spawned")
@@ -554,7 +589,7 @@ class CarlaCameraSeqEnv(gym.Env):
                     # max speed
                     ai_controller.set_max_speed(pedestrian['speed'])
             # stablize world
-            for _ in range(5):
+            for _ in range(NUM_TICKS):
                 self.world.tick()
             # 6. freeze pedestrians
             if not motion:
@@ -590,6 +625,7 @@ class CarlaCameraSeqEnv(gym.Env):
             self.pedestrian_gts.append(
                 {
                     "id": pedestrian['id'],
+                    "bp_id": pedestrian['bp_id'],
                     "x": loc.x,
                     "y": loc.y,
                     "z": ped_z,
