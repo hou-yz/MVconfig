@@ -71,7 +71,7 @@ class frameDataset(VisionDataset):
     def __init__(self, base, split='train', reID=False, world_reduce=4, trans_img_shape=(720, 1280),
                  world_kernel_size=10, img_kernel_size=10,
                  split_ratio=(0.8, 0.1, 0.1), top_k=100, force_download=True, augmentation='',
-                 interactive=False, seed=None):
+                 interactive=False, decimate=1, seed=None):
         super().__init__(base.root)
 
         self.base = base
@@ -93,6 +93,7 @@ class frameDataset(VisionDataset):
             T.Compose([T.ToTensor(), T.Resize(trans_img_shape, antialias=True),
                        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
         self.interactive = interactive
+        self.decimate = decimate  # Use for reducing the FPS of rendered sequences.
 
         self.Rworld_shape = list(map(lambda x: x // self.world_reduce, self.worldgrid_shape))
         self.Rimg_shape = np.ceil(np.array(trans_img_shape) // 8).astype(int).tolist()
@@ -120,6 +121,14 @@ class frameDataset(VisionDataset):
         self.gt_fname = f'{self.root}/gt.txt'
         if self.base.__name__ == 'CarlaX':
             self.z = self.base.z
+
+            # In CarlaX, the pedestrian IDs are just the blueprint IDs and it is fixed for all scenes
+            self.pid_dict = {i: i for i in range(len(self.base.env.pedestrian_bps))}
+
+            # In CarlaX and reID mode, we need to use a counter to keep track of the current frame
+            # since we will be rendering a few frames before we reset the environment.
+            self.reID_reset_done = False
+
             # generate same pedestrian layout for the same frame
             if seed is not None:
                 # random_generator = random.Random(seed)
@@ -230,6 +239,7 @@ class frameDataset(VisionDataset):
         return world_gt, imgs_gt, pid_dict, frames
 
     def get_carla_gt_targets(self, all_pedestrians):
+        # NOTE: for re-ID task setup, we use the pedestrian blueprint id as the identity
         world_pts, world_lwh, world_pids = [], [], []
         img_bboxs, img_pids = [[] for _ in range(self.num_cam)], [[] for _ in range(self.num_cam)]
         for pedestrian in all_pedestrians:
@@ -237,11 +247,11 @@ class frameDataset(VisionDataset):
             world_pts.append(self.base.get_worldgrid_from_worldcoord(
                 np.array([pedestrian["x"], pedestrian["y"]])[None]).squeeze())
             world_lwh.append([pedestrian["l"], pedestrian["w"], pedestrian["h"]])
-            world_pids.append(pedestrian["id"])
+            world_pids.append(pedestrian["bp_id"])
             for cam in range(self.num_cam):
                 if itemgetter('xmin', 'ymin', 'xmax', 'ymax')(pedestrian['views'][cam]) != (-1, -1, -1, -1):
                     img_bboxs[cam].append(itemgetter('xmin', 'ymin', 'xmax', 'ymax')(pedestrian['views'][cam]))
-                    img_pids[cam].append(pedestrian["id"])
+                    img_pids[cam].append(pedestrian["bp_id"])
         for cam in range(self.num_cam):
             img_bboxs[cam], img_pids[cam] = np.array(img_bboxs[cam]), np.array(img_pids[cam])
         return np.array(world_pts), np.array(world_lwh), np.array(world_pids), img_bboxs, img_pids
@@ -259,14 +269,27 @@ class frameDataset(VisionDataset):
 
     def __getitem__(self, index=None, visualize=False, use_depth=False):
         if self.base.__name__ == 'CarlaX':
-            if index is not None:  # reset (remove) all pedestrians
-                observation, info = self.base.env.reset(seed=self.fixed_seeds[index])
+            # Conditions for a reset:
+            # 1. When doing training (train/trainval), random frames for detection/reID is fine, just randomly reset.
+            # 2. When not doing reID, random frames won't bother detection, so it's fine.
+            # 3. When validating/testing reID, for the first time we need to reset the environment.
+            random_reset = self.split == 'train' or self.split == 'trainval' or not self.reID or not self.reID_reset_done
+            if index is not None:  # reset (remove) all pedestrians, return DEFAULT images and info!
+                if random_reset:
+                    observation, info = self.base.env.reset(seed=self.fixed_seeds[index])
                 self.cur_frame = self.frames[index]
             else:
                 assert self.interactive
-            if not self.interactive or index is None:  # only spawn pedestrian after interactive steps (index==None)
+            
+            if (not self.interactive or index is None):  # only spawn pedestrian after interactive steps (index==None)
                 use_depth = ('train' in self.split) and use_depth
-                observation, info = self.base.env.spawn_and_render(use_depth)
+                # only when resetting the environment, we need to spawn the pedestrians and render
+                # otherwise, we render continuous frames
+                if random_reset:
+                    observation, info = self.base.env.spawn_and_render(use_depth)
+                    self.reID_reset_done = True
+                else:
+                    observation, info = self.base.env.render_and_update_pedestrian_gts(use_depth, decimate=self.decimate)
             # get camera matrices
             self.proj_mats = torch.stack([get_worldcoord_from_imgcoord_mat(self.base.env.camera_intrinsics[cam],
                                                                            self.base.env.camera_extrinsics[cam],
@@ -295,12 +318,22 @@ class frameDataset(VisionDataset):
         return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, depths,
                                visualize)
 
-    def get_gt_array(self, frames=None):
+    def get_gt_array(self, frames=None, reID=True):
+        # self.reID -> Whether enables reID mode in the dataset
+        # reID -> Whether to return the reID gt array
+        # Automatically turning off reID mode if reID was not enabled in the dataset
+        reID = reID and self.reID
+
         if self.base.__name__ == 'CarlaX':
             gt_array = []
             for frame in self.world_gt.keys() if frames is None else frames:
-                gt_array.append(np.concatenate([frame * np.ones([len(self.world_gt[frame][0]), 1]),
-                                                self.world_gt[frame][0]], axis=1))
+                frame_res = np.concatenate([frame * np.ones([len(self.world_gt[frame][0]), 1]),
+                                                self.world_gt[frame][0]], axis=1)
+                # Put the pedestrian blueprint id as the identity into the 2nd column
+                if reID:
+                    pids = self.world_gt[frame][1].reshape(-1, 1)
+                    frame_res = np.concatenate([frame_res[:,:1], pids, frame_res[:,1:]], axis=1)
+                gt_array.append(frame_res)
             gt_array = np.concatenate(gt_array, axis=0)
         else:
             gt_array = np.loadtxt(self.gt_fname)

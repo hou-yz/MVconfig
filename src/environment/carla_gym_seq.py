@@ -363,6 +363,21 @@ class CarlaCameraSeqEnv(gym.Env):
             for cam in range(self.num_cam):
                 self.depth_cameras[cam].destroy()
         return observation, info
+    
+    def render_and_update_pedestrian_gts(self, use_depth=False, decimate=1):
+        images, depth_images = self.render(use_depth=use_depth, decimate=decimate)
+        observation = {
+            "images": images,
+            "camera_configs": {cam: self.encode_camera_cfg(self.camera_configs[cam])
+                               for cam in range(self.num_cam)},
+            "step": self.step_counter
+        }
+        self.update_pedestrian_gts()
+        info = {"pedestrian_gts": self.pedestrian_gts,
+                "depths": depth_images,
+                "camera_intrinsics": self.camera_intrinsics,
+                "camera_extrinsics": self.camera_extrinsics}
+        return observation, info
 
     def step(self, action):
         # Perform one step in the environment based on the given action
@@ -401,7 +416,18 @@ class CarlaCameraSeqEnv(gym.Env):
         # you may need to use copy.deepcopy() to avoid effects from further steps
         return observation, reward, done, info
 
-    def render(self, cams=None, use_depth=False):
+    def render(self, cams=None, use_depth=False, decimate=1):
+        # The decimate rate is introduced to reduce the FPS of rendered sequences.
+        # The target FPS will be 1/(0.05*decimate), which is achieved by ticking the world more times.
+        # NOTE: This is only used in reID task, and thus referred in the render_and_update_pedestrian_gts() function
+        if decimate > 1:
+            for _ in range(decimate):
+                self.world.tick()
+            # Sleep the thread for a prolonged perioid here for synchronization
+            # NOTE: Insufficient sleep time will cause the client to be out of sync with the server
+            #       and the later assertion will fail!!!!!
+            time.sleep(SLEEP_TIME * decimate)
+
         # Render the environment
         images = {}
         depth_images = {}

@@ -576,6 +576,7 @@ class PerspectiveTrainer(object):
             if self.args.base_lr_ratio == 0:
                 self.model.base.eval()
             if self.args.interactive:
+                # TODO: Consider `world_id` and `img_id` usage in "interactive mode"!!!
                 self.agent.eval()
                 feat, (world_heatmap, world_offset), (world_gt, imgs_gt) = self.expand_episode(
                     dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
@@ -583,18 +584,22 @@ class PerspectiveTrainer(object):
                     override_action=(torch.rand([N, len(dataloader.dataset.action_names)]) * 2 - 1
                                      if self.args.random_search else None))
             else:
-                (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = \
+                (world_heatmap, world_offset, world_id), (imgs_heatmap, imgs_offset, imgs_wh, imgs_id) = \
                     self.model(imgs.cuda(), aug_mats, proj_mats)
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].flatten(0, 1)
-            # MVDet loss
+            # MVDet loss - (w_loss = center_loss + offset_loss + id_loss)
             if self.args.use_mse:
                 w_loss = F.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device))
             else:
                 loss_w_hm = focal_loss(world_heatmap, world_gt['heatmap'])
                 loss_w_off = regL1loss(world_offset, world_gt['reg_mask'], world_gt['idx'], world_gt['offset'])
-                # loss_w_id = self.ce_loss(world_id, world_gt['reg_mask'], world_gt['idx'], world_gt['pid'])
-                w_loss = loss_w_hm + loss_w_off  # + self.args.id_ratio * loss_w_id
+                loss_w_id = regCEloss(world_id, world_gt['reg_mask'], world_gt['idx'], world_gt['pid'])
+                w_loss = loss_w_hm + loss_w_off + self.args.id_ratio * loss_w_id
+            
+            # When not training camera configs, compute per-view detection losses, including 
+            # center_loss, offset_loss and wh_loss. When searching best camera configs, we don't
+            # enable this loss because NO PEDESTRIAN is spawned in the world in this stage.
             if not self.args.interactive:
                 if self.args.use_mse:
                     img_loss = F.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
@@ -602,10 +607,12 @@ class PerspectiveTrainer(object):
                     loss_img_hm = focal_loss(imgs_heatmap, imgs_gt['heatmap'])
                     loss_img_off = regL1loss(imgs_offset, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['offset'])
                     loss_img_wh = regL1loss(imgs_wh, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['wh'])
-                    # loss_img_id = self.ce_loss(imgs_id, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['pid'])
-                    img_loss = loss_img_hm + loss_img_off + loss_img_wh * 0.1  # + self.args.id_ratio * loss_img_id
+                    loss_img_id = regCEloss(imgs_id, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['pid'])
+                    img_loss = loss_img_hm + loss_img_off + loss_img_wh * 0.1 + self.args.id_ratio * loss_img_id
             else:
                 img_loss = torch.zeros([]).cuda()
+
+            # TODO: Consider the Contrastive loss for the tracking task in EarlyBird
 
             loss = w_loss + img_loss / N * self.args.alpha
             losses += loss.item()
@@ -681,6 +688,8 @@ class PerspectiveTrainer(object):
                 ids, count = nms(pos, s, 20, np.inf)
                 res = torch.cat([torch.ones([count, 1]) * frame[b], pos[ids[:count]]], dim=1)
                 res_list.append(res)
+
+        # TODO: Add MOTA during testing
 
         res = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
         # np.savetxt(f'{self.logdir}/test.txt', res, '%d')

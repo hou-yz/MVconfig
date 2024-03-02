@@ -61,7 +61,7 @@ class MVDet(MultiviewBase):
         self.img_heatmap = output_head(self.base_dim, outfeat_dim, 1)
         self.img_offset = output_head(self.base_dim, outfeat_dim, 2)
         self.img_wh = output_head(self.base_dim, outfeat_dim, 2)
-        # self.img_id = output_head(base_dim, outfeat_dim, len(dataset.pid_dict))
+        self.img_id = output_head(self.base_dim, outfeat_dim, len(dataset.pid_dict))
 
         # world feat
         self.world_feat = nn.Sequential(nn.Conv2d(self.base_dim, hidden_dim, 3, padding=1), nn.ReLU(),
@@ -71,7 +71,7 @@ class MVDet(MultiviewBase):
         # world heads
         self.world_heatmap = output_head(hidden_dim, outfeat_dim, 1)
         self.world_offset = output_head(hidden_dim, outfeat_dim, 2)
-        # self.world_id = output_head(hidden_dim, outfeat_dim, len(dataset.pid_dict))
+        self.world_id = output_head(hidden_dim, outfeat_dim, len(dataset.pid_dict))
 
         # init
         self.img_heatmap[-1].bias.data.fill_(-2.19)
@@ -121,6 +121,7 @@ class MVDet(MultiviewBase):
         imgs_heatmap = self.img_heatmap(imgs_feat)
         imgs_offset = self.img_offset(imgs_feat)
         imgs_wh = self.img_wh(imgs_feat)
+        imgs_id = self.img_id(imgs_feat)
 
         # if visualize:
         #     for cam in range(N):
@@ -145,7 +146,8 @@ class MVDet(MultiviewBase):
 
         return world_feat, (F.interpolate(imgs_heatmap, self.Rimg_shape),
                             F.interpolate(imgs_offset, self.Rimg_shape),
-                            F.interpolate(imgs_wh, self.Rimg_shape))
+                            F.interpolate(imgs_wh, self.Rimg_shape),
+                            F.interpolate(imgs_id, self.Rimg_shape))
 
     def get_output(self, world_feat, visualize=False):
         B, N, C, H, W = world_feat.shape
@@ -155,7 +157,7 @@ class MVDet(MultiviewBase):
         world_feat = self.world_feat(world_feat)
         world_heatmap = self.world_heatmap(world_feat)
         world_offset = self.world_offset(world_feat)
-        # world_id = self.world_id(world_feat)
+        world_id = self.world_id(world_feat)
 
         if visualize:
             visualize_img = array2heatmap(torch.norm(world_feat[0].detach(), dim=0).cpu())
@@ -167,7 +169,7 @@ class MVDet(MultiviewBase):
             plt.imshow(visualize_img)
             plt.show()
 
-        return world_heatmap, world_offset
+        return world_heatmap, world_offset, world_id
 
     def get_world_heatmap(self, feat):
         B, C, H, W = feat.shape
