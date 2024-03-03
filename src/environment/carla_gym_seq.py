@@ -364,8 +364,8 @@ class CarlaCameraSeqEnv(gym.Env):
                 self.depth_cameras[cam].destroy()
         return observation, info
     
-    def render_and_update_pedestrian_gts(self, use_depth=False, decimate=1):
-        images, depth_images = self.render(use_depth=use_depth, decimate=decimate)
+    def render_and_update_pedestrian_gts(self, use_depth=False):
+        images, depth_images = self.render(use_depth=use_depth)
         observation = {
             "images": images,
             "camera_configs": {cam: self.encode_camera_cfg(self.camera_configs[cam])
@@ -416,18 +416,7 @@ class CarlaCameraSeqEnv(gym.Env):
         # you may need to use copy.deepcopy() to avoid effects from further steps
         return observation, reward, done, info
 
-    def render(self, cams=None, use_depth=False, decimate=1):
-        # The decimate rate is introduced to reduce the FPS of rendered sequences.
-        # The target FPS will be 1/(0.05*decimate), which is achieved by ticking the world more times.
-        # NOTE: This is only used in reID task, and thus referred in the render_and_update_pedestrian_gts() function
-        if decimate > 1:
-            for _ in range(decimate):
-                self.world.tick()
-            # Sleep the thread for a prolonged perioid here for synchronization
-            # NOTE: Insufficient sleep time will cause the client to be out of sync with the server
-            #       and the later assertion will fail!!!!!
-            time.sleep(SLEEP_TIME * decimate)
-
+    def render(self, cams=None, use_depth=False):
         # Render the environment
         images = {}
         depth_images = {}

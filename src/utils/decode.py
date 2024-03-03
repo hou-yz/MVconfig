@@ -77,8 +77,8 @@ def ctdet_decode(heatmap, offset=None, wh=None, id=None, top_K=100):
     return detections
 
 
-def mvdet_decode(scoremap, offset=None, reduce=4):
-    B, C, H, W = scoremap.shape
+def mvdet_decode(scoremap, offset=None, ids_emb=None, reduce=4):
+    B, _, H, W = scoremap.shape
     # scoremap = _nms(scoremap)
 
     xy = torch.nonzero(torch.ones_like(scoremap.detach()[:, 0])).view([B, H * W, 3])[:, :, [2, 1]].float()
@@ -90,4 +90,12 @@ def mvdet_decode(scoremap, offset=None, reduce=4):
     xy *= reduce
     scores = scoremap.detach().permute(0, 2, 3, 1).reshape(B, H * W, 1)
 
-    return torch.cat([xy, scores], dim=2)
+    results = torch.cat([xy, scores], dim=2)
+
+    # Process ID embeddings
+    if ids_emb is not None:
+        # B, H * W, C
+        ids_emb = ids_emb.detach().permute(0, 2, 3, 1).reshape(B, H * W, -1)
+        results = torch.cat([results, ids_emb], dim=2)
+
+    return results

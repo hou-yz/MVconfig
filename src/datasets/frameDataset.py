@@ -71,7 +71,7 @@ class frameDataset(VisionDataset):
     def __init__(self, base, split='train', reID=False, world_reduce=4, trans_img_shape=(720, 1280),
                  world_kernel_size=10, img_kernel_size=10,
                  split_ratio=(0.8, 0.1, 0.1), top_k=100, force_download=True, augmentation='',
-                 interactive=False, decimate=1, seed=None):
+                 interactive=False, seed=None):
         super().__init__(base.root)
 
         self.base = base
@@ -93,7 +93,6 @@ class frameDataset(VisionDataset):
             T.Compose([T.ToTensor(), T.Resize(trans_img_shape, antialias=True),
                        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
         self.interactive = interactive
-        self.decimate = decimate  # Use for reducing the FPS of rendered sequences.
 
         self.Rworld_shape = list(map(lambda x: x // self.world_reduce, self.worldgrid_shape))
         self.Rimg_shape = np.ceil(np.array(trans_img_shape) // 8).astype(int).tolist()
@@ -268,6 +267,8 @@ class frameDataset(VisionDataset):
         return Rworldgrid_from_imgcoord
 
     def __getitem__(self, index=None, visualize=False, use_depth=False):
+        # TODO: loading different seeds for for tracking test set, such that we can use different clips
+        #       in training.
         if self.base.__name__ == 'CarlaX':
             # Conditions for a reset:
             # 1. When doing training (train/trainval), random frames for detection/reID is fine, just randomly reset.
@@ -289,7 +290,7 @@ class frameDataset(VisionDataset):
                     observation, info = self.base.env.spawn_and_render(use_depth)
                     self.reID_reset_done = True
                 else:
-                    observation, info = self.base.env.render_and_update_pedestrian_gts(use_depth, decimate=self.decimate)
+                    observation, info = self.base.env.render_and_update_pedestrian_gts(use_depth)
             # get camera matrices
             self.proj_mats = torch.stack([get_worldcoord_from_imgcoord_mat(self.base.env.camera_intrinsics[cam],
                                                                            self.base.env.camera_extrinsics[cam],
@@ -318,10 +319,10 @@ class frameDataset(VisionDataset):
         return self.prepare_gt(imgs, step_counter, configs, world_pts, world_pids, img_bboxs, img_pids, depths,
                                visualize)
 
-    def get_gt_array(self, frames=None, reID=True):
+    def get_gt_array(self, frames=None, reID=False):
         # self.reID -> Whether enables reID mode in the dataset
         # reID -> Whether to return the reID gt array
-        # Automatically turning off reID mode if reID was not enabled in the dataset
+        # Force to off reID mode if reID was not enabled in the dataset
         reID = reID and self.reID
 
         if self.base.__name__ == 'CarlaX':

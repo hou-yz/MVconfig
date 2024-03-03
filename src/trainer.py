@@ -17,7 +17,9 @@ from PIL import Image
 from src.parameters import *
 from src.loss import *
 from src.evaluation.evaluate import evaluate, evaluateDetection_py
+from src.evaluation.mot_bev import mot_metrics_pedestrian
 from src.environment.cameras import action2proj_mat
+from src.tracking.multitracker import JDETracker
 from src.utils.decode import ctdet_decode, mvdet_decode
 from src.utils.nms import nms
 from src.utils.meters import AverageMeter
@@ -78,6 +80,9 @@ class PerspectiveTrainer(object):
         # self.action_mapping = torch.tanh
         self.best_action = None
         self.best_episodic_return = 0
+
+        # Initialize the test tracker for the tracking task
+        self.test_tracker = JDETracker(conf_thres=args.tracker_conf_thres, gating_threshold=args.tracker_gating_threshold)
 
         # filter out visible locations
         xx, yy = np.meshgrid(np.arange(0, model.Rworld_shape[1]), np.arange(0, model.Rworld_shape[0]))
@@ -148,7 +153,7 @@ class PerspectiveTrainer(object):
         imgs = to_tensor(imgs)[None]
         aug_mats, proj_mats = to_tensor(aug_mats)[None], to_tensor(proj_mats)[None]
         model_feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
-        world_heatmap, world_offset = self.model.get_output(model_feat.cuda())
+        world_feat, (world_heatmap, world_offset, world_id) = self.model.get_output(model_feat.cuda())
 
         if not training:
             if visualize:
@@ -612,8 +617,6 @@ class PerspectiveTrainer(object):
             else:
                 img_loss = torch.zeros([]).cuda()
 
-            # TODO: Consider the Contrastive loss for the tracking task in EarlyBird
-
             loss = w_loss + img_loss / N * self.args.alpha
             losses += loss.item()
 
@@ -652,6 +655,8 @@ class PerspectiveTrainer(object):
         losses = 0
         cover_avg = 0
         res_list = []
+        track_res_list = []
+
         for batch_idx, (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) in enumerate(dataloader):
             B, N = configs.shape[:2]
             with torch.no_grad():
@@ -663,7 +668,7 @@ class PerspectiveTrainer(object):
                         visualize=(batch_idx < 5), batch_idx=batch_idx, override_action=override_action)
                 else:
                     feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
-                    world_heatmap, world_offset = self.model.get_output(feat.cuda())
+                    world_feat, (world_heatmap, world_offset, world_id) = self.model.get_output(feat.cuda())
                     if batch_idx < 5 and visualize:
                         Image.fromarray(cover_visualize(dataloader.dataset, feat[0], world_heatmap[0],
                                                         {key: value[0] for key, value in world_gt.items()})
@@ -680,6 +685,8 @@ class PerspectiveTrainer(object):
 
             xys = mvdet_decode(torch.sigmoid(world_heatmap), world_offset,
                                reduce=dataloader.dataset.world_reduce).cpu()
+
+            # BEV detection predictions
             grid_xy, scores = xys[:, :, :2], xys[:, :, 2:3]
             positions = grid_xy
             for b in range(B):
@@ -689,15 +696,55 @@ class PerspectiveTrainer(object):
                 res = torch.cat([torch.ones([count, 1]) * frame[b], pos[ids[:count]]], dim=1)
                 res_list.append(res)
 
-        # TODO: Add MOTA during testing
+            # Tracking predictions
+            if self.args.reID:
+                # The id parameter is actually the id feature, in our case is just the bev feature
+                results = mvdet_decode(torch.sigmoid(world_heatmap), world_offset, ids_emb=world_feat,
+                                       reduce=dataloader.dataset.world_reduce).cpu()
+                # bev_det is the [B, H*W, 5] tensor, where the last dimension is [x, y, _, _, score]
+                bev_det = torch.concatenate([results[:, :, :2], torch.ones_like(results[:, :, :2]), results[:, :, 2:3]], dim=2)
+                # The id_emb is the [B, H*W, 128] tensor
+                id_embs = results[:, :, 3:]
+
+                # iterating through batches
+                for b in range(B):
+                    # Although in the tracker, we will filter the ids based on the threshold, we do it here in advance.
+                    ids = bev_det[b, :, 4] > self.args.tracker_conf_thres
+                    # Find the positions and scores and apply non-maximum-suppresion
+                    pos, s = bev_det[b, ids, :2], bev_det[b, ids, 4]
+                    # Applying NMS, and only use a subset of candidates
+                    ids, count = nms(pos, s, 20, np.inf)
+                    # Put the bev_detection, id_embs into the tracker, which predicts the tracking results
+                    output_stracks = self.test_tracker.update(bev_det[b, ids], id_embs[b, ids])
+                    # The tracking results are stored in the track_res_list, as the score is not used, we don't save it.
+                    track_res_list.extend([
+                        [frame, s.track_id] + s.tlwh.tolist()[:2]
+                        for s in output_stracks
+                    ])
 
         res = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
         # np.savetxt(f'{self.logdir}/test.txt', res, '%d')
         moda, modp, precision, recall, stats = evaluateDetection_py(res,
                                                                     dataloader.dataset.get_gt_array(),
                                                                     dataloader.dataset.frames)
+        
+        # Add MOTA during testing
+        track_res = torch.cat(track_res_list, dim=0).numpy() if track_res_list else np.empty([0, 4])
+
+        # Evaluate tracking performance and convert to percentage
+        # https://github.com/cheind/py-motmetrics/blob/develop/Readme.md
+        # "Metric MOTP seems to be off. To convert compute (1 - MOTP) * 100.
+        #   MOTChallenge benchmarks compute MOTP as percentage, while py-motmetrics sticks to
+        #   the original definition of average distance over number of assigned objects [1]."
+        summary = mot_metrics_pedestrian(track_res, dataloader.dataset.get_gt_array(reID=True))
+        mota = summary['mota'] * 100
+        motp = (1 - summary['motp']) * 100
+        track_precision = summary['precision'] * 100
+        track_recall = summary['recall'] * 100
+
         print(f'Test, cover: {cover_avg / len(dataloader):.3f}, loss: {losses / len(dataloader):.6f}, '
               f'moda: {moda:.1f}%, modp: {modp:.1f}%, prec: {precision:.1f}%, recall: {recall:.1f}%, '
+              f'mota: {mota:.1f}%, motp: {motp:.1f}%, prec_t: {track_precision:.1f}%, recall_t: {track_recall:.1f}%,'
               f'time: {time.time() - t0:.1f}s')
 
         if self.writer is not None:

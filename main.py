@@ -57,6 +57,12 @@ def main(args):
 
     # increase process niceness
     # os.nice(10)
+    
+    # id_ratio should be set to 0, if not using reID
+    if not args.reID:
+        args.id_ratio = 0
+    # assert non-zero id_ratio if using reID
+    assert args.id_ratio > 0 or not args.reID
 
     # dataset
     if args.dataset == 'carlax':
@@ -148,7 +154,7 @@ def main(args):
         model_dict = model.state_dict()
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
         model_dict.update(pretrained_dict)
-        model.load_state_dict(model_dict)
+        model.load_state_dict(model_dict, strict=False)  # the model may not have the reid head weights
         if args.interactive:
             if args.resume:
                 control_module.load_state_dict(torch.load(f'logs/{args.dataset}/{args.resume}/control_module.pth'))
@@ -341,10 +347,7 @@ if __name__ == '__main__':
     parser.add_argument('--reID', action='store_true')
     parser.add_argument('--augmentation', type=str, default='affine')
     parser.add_argument('--dropout', type=float, default=0.0)
-    # ---------- PAY ATTENTION TO BELOW! ----------
     parser.add_argument('--id_ratio', type=float, default=0)
-    parser.add_argument
-    # ---------- PAY ATTENTION TO ABOVE! ----------
     parser.add_argument('--cls_thres', type=float, default=0.6)
     parser.add_argument('--alpha', type=float, default=0.0, help='ratio for per view loss')
     parser.add_argument('--use_mse', type=str2bool, default=False)
@@ -354,6 +357,16 @@ if __name__ == '__main__':
     parser.add_argument('--world_reduce', type=int, default=4)
     parser.add_argument('--world_kernel_size', type=int, default=10)
     parser.add_argument('--img_kernel_size', type=int, default=10)
+    # Additional settings for the JDETracker and tracking tast
+    # FIXME
+    # ---------- Use the argument below!!! ----------
+    parser.add_argument('--track_scene_len', type=int, default=80,
+                        help='number of frames for each tracking scene')
+    # ---------- Use the argument above!!! ----------
+    parser.add_argument('--tracker_conf_thres', type=float, default=0.4,
+                        help='object confidence threshold')
+    parser.add_argument('--tracker_gating_threshold', type=float, default=1000,
+                        help='gating threshold for motion fusion matching')
 
     args = parser.parse_args()
 

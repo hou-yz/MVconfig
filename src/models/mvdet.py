@@ -169,7 +169,7 @@ class MVDet(MultiviewBase):
             plt.imshow(visualize_img)
             plt.show()
 
-        return world_heatmap, world_offset, world_id
+        return world_feat, (world_heatmap, world_offset, world_id)
 
     def get_world_heatmap(self, feat):
         B, C, H, W = feat.shape
