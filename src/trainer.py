@@ -683,7 +683,10 @@ class PerspectiveTrainer(object):
                 loss = F.mse_loss(world_heatmap, world_gt['heatmap'].cuda())
             losses += loss.item()
 
-            xys = mvdet_decode(torch.sigmoid(world_heatmap), world_offset,
+            # If reID mode, xys is [B, H*W, 3+128], otherwise [B, H*W, 3].
+            # The first 3 channels are [x,y,s], last 128 channels are the embeddings.
+            ids_emb = world_feat if self.args.reID else None
+            xys = mvdet_decode(torch.sigmoid(world_heatmap), world_offset, ids_emb=ids_emb,
                                reduce=dataloader.dataset.world_reduce).cpu()
 
             # BEV detection predictions
@@ -698,13 +701,10 @@ class PerspectiveTrainer(object):
 
             # Tracking predictions
             if self.args.reID:
-                # The id parameter is actually the id feature, in our case is just the bev feature
-                results = mvdet_decode(torch.sigmoid(world_heatmap), world_offset, ids_emb=world_feat,
-                                       reduce=dataloader.dataset.world_reduce).cpu()
                 # bev_det is the [B, H*W, 5] tensor, where the last dimension is [x, y, _, _, score]
-                bev_det = torch.concatenate([results[:, :, :2], torch.ones_like(results[:, :, :2]), results[:, :, 2:3]], dim=2)
+                bev_det = torch.concatenate([xys[:, :, :2], torch.ones_like(xys[:, :, :2]), xys[:, :, 2:3]], dim=2)
                 # The id_emb is the [B, H*W, 128] tensor
-                id_embs = results[:, :, 3:]
+                id_embs = xys[:, :, 3:]
 
                 # iterating through batches
                 for b in range(B):
