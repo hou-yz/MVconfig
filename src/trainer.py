@@ -81,9 +81,6 @@ class PerspectiveTrainer(object):
         self.best_action = None
         self.best_episodic_return = 0
 
-        # Initialize the test tracker for the tracking task
-        self.test_tracker = JDETracker(conf_thres=args.tracker_conf_thres, gating_threshold=args.tracker_gating_threshold)
-
         # filter out visible locations
         xx, yy = np.meshgrid(np.arange(0, model.Rworld_shape[1]), np.arange(0, model.Rworld_shape[0]))
         # self.unit_world_grids = torch.tensor(np.stack([xx, yy], axis=2), dtype=torch.float).flatten(0, 1)
@@ -581,7 +578,7 @@ class PerspectiveTrainer(object):
             if self.args.base_lr_ratio == 0:
                 self.model.base.eval()
             if self.args.interactive:
-                # TODO: Consider `world_id` and `img_id` usage in "interactive mode"!!!
+                # FIXME: Consider `world_id` and `img_id` usage in "interactive mode"!!!
                 self.agent.eval()
                 feat, (world_heatmap, world_offset), (world_gt, imgs_gt) = self.expand_episode(
                     dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
@@ -593,14 +590,24 @@ class PerspectiveTrainer(object):
                     self.model(imgs.cuda(), aug_mats, proj_mats)
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].flatten(0, 1)
+
+            # Compute the current step
+            step = batch_idx + (epoch - 1) * len(dataloader)
+
             # MVDet loss - (w_loss = center_loss + offset_loss + id_loss)
             if self.args.use_mse:
                 w_loss = F.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device))
+                self.writer.add_scalar("mvdet/w_loss", w_loss.item(), step)
             else:
                 loss_w_hm = focal_loss(world_heatmap, world_gt['heatmap'])
                 loss_w_off = regL1loss(world_offset, world_gt['reg_mask'], world_gt['idx'], world_gt['offset'])
                 loss_w_id = regCEloss(world_id, world_gt['reg_mask'], world_gt['idx'], world_gt['pid'])
                 w_loss = loss_w_hm + loss_w_off + self.args.id_ratio * loss_w_id
+
+                # Add loss information into tensorboard for debug
+                self.writer.add_scalar("mvdet/loss_w_hm", loss_w_hm.item(), step)
+                self.writer.add_scalar("mvdet/loss_w_off", loss_w_off.item(), step)
+                self.writer.add_scalar("mvdet/loss_w_id", loss_w_id.item(), step)
             
             # When not training camera configs, compute per-view detection losses, including 
             # center_loss, offset_loss and wh_loss. When searching best camera configs, we don't
@@ -608,17 +615,26 @@ class PerspectiveTrainer(object):
             if not self.args.interactive:
                 if self.args.use_mse:
                     img_loss = F.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
+                    self.writer.add_scalar("mvdet/img_loss", img_loss.item(), step)
                 else:
                     loss_img_hm = focal_loss(imgs_heatmap, imgs_gt['heatmap'])
                     loss_img_off = regL1loss(imgs_offset, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['offset'])
                     loss_img_wh = regL1loss(imgs_wh, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['wh'])
                     loss_img_id = regCEloss(imgs_id, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['pid'])
                     img_loss = loss_img_hm + loss_img_off + loss_img_wh * 0.1 + self.args.id_ratio * loss_img_id
+
+                    # Add loss information into tensorboard for debug
+                    self.writer.add_scalar("mvdet/loss_img_hm", loss_img_hm.item(), step)
+                    self.writer.add_scalar("mvdet/loss_img_off", loss_img_off.item(), step)
+                    self.writer.add_scalar("mvdet/loss_img_wh", loss_img_wh.item(), step)
+                    self.writer.add_scalar("mvdet/loss_img_id", loss_img_id.item(), step)
             else:
                 img_loss = torch.zeros([]).cuda()
 
             loss = w_loss + img_loss / N * self.args.alpha
             losses += loss.item()
+
+            self.writer.add_scalar("mvdet/loss", loss.item(), step)
 
             # train MVDet
             optimizers[0].zero_grad()
@@ -656,9 +672,22 @@ class PerspectiveTrainer(object):
         cover_avg = 0
         res_list = []
         track_res_list = []
+        tracker_reset_frames = []
 
         for batch_idx, (step, configs, imgs, aug_mats, proj_mats, world_gt, imgs_gt, frame) in enumerate(dataloader):
             B, N = configs.shape[:2]
+            # We need to assert batch_size == 1 for the tracking results gathering resons
+            assert B == 1, 'only support batch_size == 1'
+            # Initialize the test tracker for the tracking task
+            if self.args.reID:
+                # When the remainder is 0, it means that we have entered a new scene
+                if batch_idx % dataloader.dataset.tracking_scene_len == 0:
+                    # Reset the test_tracker each time we enter a new scene
+                    self.test_tracker = JDETracker(conf_thres=self.args.tracker_conf_thres,
+                                                   gating_threshold=self.args.tracker_gating_threshold)
+                    # Remember the frames when the test_tracker is reset, used later for splitting the tracking results
+                    tracker_reset_frames.append(frame.item())
+ 
             with torch.no_grad():
                 if self.args.interactive:
                     self.agent.eval()
@@ -708,6 +737,7 @@ class PerspectiveTrainer(object):
 
                 # iterating through batches
                 for b in range(B):
+                    # FIXME: tracker doesn't work!!!
                     # Although in the tracker, we will filter the ids based on the threshold, we do it here in advance.
                     ids = bev_det[b, :, 4] > self.args.tracker_conf_thres
                     # Find the positions and scores and apply non-maximum-suppresion
@@ -722,6 +752,10 @@ class PerspectiveTrainer(object):
                         for s in output_stracks
                     ])
 
+        # Always add the last (frame+1) as the reset frame, this ensures that last frame from the 
+        # last sequence is included in the tracking results.
+        tracker_reset_frames.append(frame.item() + 1)
+
         res = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
         # np.savetxt(f'{self.logdir}/test.txt', res, '%d')
         moda, modp, precision, recall, stats = evaluateDetection_py(res,
@@ -730,17 +764,34 @@ class PerspectiveTrainer(object):
         
         # Add MOTA during testing
         track_res = torch.cat(track_res_list, dim=0).numpy() if track_res_list else np.empty([0, 4])
+        motas, motps, track_precisions, track_recalls = [], [], [], []
 
         # Evaluate tracking performance and convert to percentage
         # https://github.com/cheind/py-motmetrics/blob/develop/Readme.md
         # "Metric MOTP seems to be off. To convert compute (1 - MOTP) * 100.
         #   MOTChallenge benchmarks compute MOTP as percentage, while py-motmetrics sticks to
         #   the original definition of average distance over number of assigned objects [1]."
-        summary = mot_metrics_pedestrian(track_res, dataloader.dataset.get_gt_array(reID=True))
-        mota = summary['mota'] * 100
-        motp = (1 - summary['motp']) * 100
-        track_precision = summary['precision'] * 100
-        track_recall = summary['recall'] * 100
+
+        # Split the testing according to each scene, since the MOTA/MOTP should be calculated for each scene
+        # We split the prediction based on the scene length.
+        for start, end in zip(tracker_reset_frames[:-1], tracker_reset_frames[1:]):
+            # Frames that satisfies the condition
+            t = track_res[(track_res[:, 0] >= start) & (track_res[:, 0] < end)]
+            gt = dataloader.dataset.get_gt_array(reID=True)
+            gt = gt[(gt[:, 0] >= start) & (gt[:, 0] < end)]
+
+            # Compute the MOTA, MOTP, precision, recall
+            summary = mot_metrics_pedestrian(t, gt)
+            motas.append(summary['mota'] * 100)
+            motps.append((1 - summary['motp']) * 100)
+            track_precisions.append(summary['precision'] * 100)
+            track_recalls.append(summary['recall'] * 100)
+
+        # Average the MOTA, MOTP, precision, recall
+        mota = np.mean(motas) if motas else 0.
+        motp = np.mean(motps) if motps else 0.
+        track_precision = np.mean(track_precisions) if track_precisions else 0.
+        track_recall = np.mean(track_recalls) if track_recalls else 0.
 
         print(f'Test, cover: {cover_avg / len(dataloader):.3f}, loss: {losses / len(dataloader):.6f}, '
               f'moda: {moda:.1f}%, modp: {modp:.1f}%, prec: {precision:.1f}%, recall: {recall:.1f}%, '

@@ -532,7 +532,7 @@ class CarlaCameraSeqEnv(gym.Env):
                 # Check if we already used all the blueprints, if yes, we need to stop,
                 # just wait here to jump out of the both loops
                 if counter >= len(self.pedestrian_bps_indices):
-                    print("Not enough pedestrian blueprints to spawn, skip further spawning!!!")
+                    # print("Not enough pedestrian blueprints to spawn, skip further spawning!!!")
                     break_outer_loop = True
                     break
 

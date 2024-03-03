@@ -61,8 +61,6 @@ def main(args):
     # id_ratio should be set to 0, if not using reID
     if not args.reID:
         args.id_ratio = 0
-    # assert non-zero id_ratio if using reID
-    assert args.id_ratio > 0 or not args.reID
 
     # dataset
     if args.dataset == 'carlax':
@@ -95,12 +93,14 @@ def main(args):
         args.batch_size = 1 if args.batch_size is None else args.batch_size
         args.interactive = False
 
-    train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
+    train_set = frameDataset(base, split='trainval', reID=args.reID, world_reduce=args.world_reduce,
                              world_kernel_size=args.world_kernel_size, img_kernel_size=args.img_kernel_size,
-                             interactive=args.interactive, augmentation=args.augmentation, seed=args.carla_seed)
-    test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
+                             split_ratio=args.split_ratio, interactive=args.interactive, augmentation=args.augmentation,
+                             tracking_scene_len=args.tracking_scene_len, seed=args.carla_seed)
+    test_set = frameDataset(base, split='test', reID=args.reID, world_reduce=args.world_reduce,
                             world_kernel_size=args.world_kernel_size, img_kernel_size=args.img_kernel_size,
-                            interactive=args.interactive, seed=args.carla_seed)
+                            split_ratio=args.split_ratio, interactive=args.interactive,
+                            tracking_scene_len=args.tracking_scene_len, seed=args.carla_seed)
 
     def seed_worker(worker_id):
         worker_seed = torch.initial_seed() % 2 ** 32
@@ -120,8 +120,9 @@ def main(args):
                    f'{"det_" if args.rl_deterministic else ""}' if args.interactive else '')
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}' \
              f'{f"{args.carla_cfg}_{RL_settings}" if args.dataset == "carlax" else ""}' \
-             f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
-        else f'logs/{args.dataset}/EVAL_{f"{args.carla_cfg}" if args.dataset == "carlax" else ""}{args.resume}'
+             f'TASK_{"reID" if args.reID else ""}_{args.aggregation}_e{args.epochs}_' \
+             f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
+                else f'logs/{args.dataset}/EVAL_{f"{args.carla_cfg}" if args.dataset == "carlax" else ""}{args.resume}'
     os.makedirs(logdir, exist_ok=True)
     copy_tree('src', logdir + '/scripts/src')
     copy_tree('cfg', logdir + '/scripts/cfg')
@@ -143,7 +144,7 @@ def main(args):
 
     # load checkpoint
     writer = None
-    if args.interactive or args.resume or args.eval:
+    if args.interactive or args.resume or args.eval or args.record_loss:
         load_dir = f'logs/{args.dataset}/{args.resume}' if args.resume else None
         if not os.path.exists(f'{load_dir}/model.pth'):
             # with open(f'logs/multiviewx/{args.arch}_None.txt', 'r') as fp:
@@ -162,6 +163,13 @@ def main(args):
                 # tensorboard logging
                 writer = SummaryWriter(logdir)
                 writer.add_text("hyperparameters",
+                                "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
+                                                                         for key, value in vars(args).items()])))
+        elif args.record_loss:
+            # Interactive automatically launches a tensorboard, but when in non-interact mode,
+            # we need to launch it manually if we want to record the loss
+            writer = SummaryWriter(logdir)
+            writer.add_text("hyperparameters",
                                 "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
                                                                          for key, value in vars(args).items()])))
 
@@ -347,7 +355,7 @@ if __name__ == '__main__':
     parser.add_argument('--reID', action='store_true')
     parser.add_argument('--augmentation', type=str, default='affine')
     parser.add_argument('--dropout', type=float, default=0.0)
-    parser.add_argument('--id_ratio', type=float, default=0)
+    parser.add_argument('--id_ratio', type=float, default=0.8)  # The default ratio is subject to change
     parser.add_argument('--cls_thres', type=float, default=0.6)
     parser.add_argument('--alpha', type=float, default=0.0, help='ratio for per view loss')
     parser.add_argument('--use_mse', type=str2bool, default=False)
@@ -357,12 +365,13 @@ if __name__ == '__main__':
     parser.add_argument('--world_reduce', type=int, default=4)
     parser.add_argument('--world_kernel_size', type=int, default=10)
     parser.add_argument('--img_kernel_size', type=int, default=10)
-    # Additional settings for the JDETracker and tracking tast
-    # FIXME
-    # ---------- Use the argument below!!! ----------
-    parser.add_argument('--track_scene_len', type=int, default=80,
+    # Additional settings for the JDETracker and tracking tast compability
+    parser.add_argument('--split_ratio', nargs=3, type=float, default=(0.8, 0.1, 0.1),
+                        help='train/val/test split ratio')
+    parser.add_argument('--record_loss', action='store_true',
+                        help='record loss for each frame')
+    parser.add_argument('--tracking_scene_len', type=int, default=60,
                         help='number of frames for each tracking scene')
-    # ---------- Use the argument above!!! ----------
     parser.add_argument('--tracker_conf_thres', type=float, default=0.4,
                         help='object confidence threshold')
     parser.add_argument('--tracker_gating_threshold', type=float, default=1000,

@@ -71,7 +71,7 @@ class frameDataset(VisionDataset):
     def __init__(self, base, split='train', reID=False, world_reduce=4, trans_img_shape=(720, 1280),
                  world_kernel_size=10, img_kernel_size=10,
                  split_ratio=(0.8, 0.1, 0.1), top_k=100, force_download=True, augmentation='',
-                 interactive=False, seed=None):
+                 interactive=False, tracking_scene_len=60, seed=None):
         super().__init__(base.root)
 
         self.base = base
@@ -94,6 +94,11 @@ class frameDataset(VisionDataset):
                        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
         self.interactive = interactive
 
+        # Two entries below are used to denote number of frames in a scene
+        # Only used when doing reID task.
+        self.tracking_scene_len = tracking_scene_len
+        self.curr_scene_len = 0
+
         self.Rworld_shape = list(map(lambda x: x // self.world_reduce, self.worldgrid_shape))
         self.Rimg_shape = np.ceil(np.array(trans_img_shape) // 8).astype(int).tolist()
 
@@ -112,7 +117,18 @@ class frameDataset(VisionDataset):
         elif split == 'trainval':
             frame_range = range(0, int(self.num_frame * split_ratio[1]))
         elif split == 'test':
-            frame_range = range(int(self.num_frame * split_ratio[1]), self.num_frame)
+            # Only in the case of doing reID, we allow more frames for testing
+            # to provide more variety of sequences.
+            if split_ratio[-1] > 1:
+                if reID:
+                    frame_range = range(int(self.num_frame * split_ratio[1]),
+                                        int(self.num_frame * split_ratio[2]))
+                    # Also need to update the self.num_frame attribute!!!
+                    self.num_frame = int(self.num_frame * split_ratio[2])
+                else:
+                    raise ValueError('split_ratio[-1] > 1 is only allowed when doing reID task.')
+            else:
+                frame_range = range(int(self.num_frame * split_ratio[1]), self.num_frame)
         else:
             raise Exception
 
@@ -267,14 +283,14 @@ class frameDataset(VisionDataset):
         return Rworldgrid_from_imgcoord
 
     def __getitem__(self, index=None, visualize=False, use_depth=False):
-        # TODO: loading different seeds for for tracking test set, such that we can use different clips
-        #       in training.
         if self.base.__name__ == 'CarlaX':
             # Conditions for a reset:
-            # 1. When doing training (train/trainval), random frames for detection/reID is fine, just randomly reset.
+            # 1. When not doing testing (doing training), random frames for detection/reID is fine, just randomly reset.
             # 2. When not doing reID, random frames won't bother detection, so it's fine.
-            # 3. When validating/testing reID, for the first time we need to reset the environment.
-            random_reset = self.split == 'train' or self.split == 'trainval' or not self.reID or not self.reID_reset_done
+            # 3. When testing reID, for the first time we need to reset the environment.
+            random_reset = (self.split != 'test' or not self.reID or 
+                            self.curr_scene_len % self.tracking_scene_len == 0)
+
             if index is not None:  # reset (remove) all pedestrians, return DEFAULT images and info!
                 if random_reset:
                     observation, info = self.base.env.reset(seed=self.fixed_seeds[index])
@@ -291,6 +307,10 @@ class frameDataset(VisionDataset):
                     self.reID_reset_done = True
                 else:
                     observation, info = self.base.env.render_and_update_pedestrian_gts(use_depth)
+
+                # either way, we are getting one frame we need, increment the counter
+                self.curr_scene_len += 1
+
             # get camera matrices
             self.proj_mats = torch.stack([get_worldcoord_from_imgcoord_mat(self.base.env.camera_intrinsics[cam],
                                                                            self.base.env.camera_extrinsics[cam],
