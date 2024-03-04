@@ -356,7 +356,7 @@ if __name__ == '__main__':
     parser.add_argument('--reID', action='store_true')
     parser.add_argument('--augmentation', type=str, default='affine')
     parser.add_argument('--dropout', type=float, default=0.0)
-    parser.add_argument('--id_ratio', type=float, default=0.8)  # The default ratio is subject to change
+    parser.add_argument('--id_ratio', type=float, default=0.6)  # The default ratio is subject to change
     parser.add_argument('--cls_thres', type=float, default=0.6)
     parser.add_argument('--alpha', type=float, default=0.0, help='ratio for per view loss')
     parser.add_argument('--use_mse', type=str2bool, default=False)

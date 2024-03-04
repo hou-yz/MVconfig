@@ -1,5 +1,5 @@
 carla==0.9.14
-docker_py==1.10.6
+docker==7.0.0
 gym==0.26.2
 kornia==0.7.1
 lap==0.4.0
