@@ -222,8 +222,8 @@ def main(args):
             train_loss, train_prec = trainer.train(epoch, train_loader, (optimizer_model, optimizer_agent),
                                                    (scheduler_model, scheduler_agent))
             print('Testing...')
-            test_loss, test_prec = trainer.test(test_loader, trainer.best_action if use_best_action else None,
-                                                visualize=True)
+            test_loss, test_prec = trainer.test(test_loader, epoch,
+                                                trainer.best_action if use_best_action else None, visualize=True)
 
             # draw & save
             x_epoch.append(epoch)
@@ -242,10 +242,10 @@ def main(args):
     print(logdir)
     if args.interactive:
         print(control_module.expand_mean_actions(test_set))
-    trainer.test(test_loader)
+    trainer.test(test_loader, epoch + 1)
     if args.interactive:
         print('Test recorded best...')
-        trainer.test(test_loader, trainer.best_action)
+        trainer.test(test_loader, epoch + 2, trainer.best_action)
     if args.dataset == 'carlax':
         base.env.close()
         if not is_debug:

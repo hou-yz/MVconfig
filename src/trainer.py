@@ -663,7 +663,7 @@ class PerspectiveTrainer(object):
                 scheduler.step()
         return losses / len(dataloader), None
 
-    def test(self, dataloader, override_action=None, visualize=False):
+    def test(self, dataloader, epoch=None, override_action=None, visualize=False):
         if override_action is not None:
             print(override_action)
         self.model.eval()
@@ -800,9 +800,17 @@ class PerspectiveTrainer(object):
         print(f'Test, cover: {cover_avg / len(dataloader):.3f}, loss: {losses / len(dataloader):.6f}, '
               f'moda: {moda:.1f}%, modp: {modp:.1f}%, prec: {precision:.1f}%, recall: {recall:.1f}%, '
               f'mota: {mota:.1f}%, motp: {motp:.1f}%, prec_t: {track_precision:.1f}%, recall_t: {track_recall:.1f}%, '
-              f'time: {time.time() - t0:.1f}s')
+              f'time: {time.time() - t0:.1f}s') 
 
         if self.writer is not None:
-            self.writer.add_scalar("results/moda", moda, self.rl_global_step)
+            self.writer.add_scalar("results/moda", moda, self.rl_global_step if self.args.interactive else epoch)
+            self.writer.add_scalar("results/modp", modp, self.rl_global_step if self.args.interactive else epoch)
+            self.writer.add_scalar("results/precision", precision, self.rl_global_step if self.args.interactive else epoch)
+            self.writer.add_scalar("results/recall", recall, self.rl_global_step if self.args.interactive else epoch)
+            if self.args.reID:
+                self.writer.add_scalar("results/mota", mota, self.rl_global_step if self.args.interactive else epoch)
+                self.writer.add_scalar("results/motp", motp, self.rl_global_step if self.args.interactive else epoch)
+                self.writer.add_scalar("results/precision_t", track_precision, self.rl_global_step if self.args.interactive else epoch)
+                self.writer.add_scalar("results/recall_t", track_recall, self.rl_global_step if self.args.interactive else epoch)
 
         return losses / len(dataloader), [moda, modp, precision, recall]
