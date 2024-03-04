@@ -144,7 +144,7 @@ def main(args):
 
     # load checkpoint
     writer = None
-    if args.interactive or args.resume or args.eval or args.record_loss:
+    if args.interactive or args.resume or args.eval:
         load_dir = f'logs/{args.dataset}/{args.resume}' if args.resume else None
         if not os.path.exists(f'{load_dir}/model.pth'):
             # with open(f'logs/multiviewx/{args.arch}_None.txt', 'r') as fp:
@@ -165,13 +165,14 @@ def main(args):
                 writer.add_text("hyperparameters",
                                 "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
                                                                          for key, value in vars(args).items()])))
-        elif args.record_loss:
-            # Interactive automatically launches a tensorboard, but when in non-interact mode,
-            # we need to launch it manually if we want to record the loss
-            writer = SummaryWriter(logdir)
-            writer.add_text("hyperparameters",
-                                "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
-                                                                         for key, value in vars(args).items()])))
+
+    if args.record_loss and not writer:
+        # The case where we intentionally record the loss for each frame
+        # Only initialize the writer if it was not initialized before
+        writer = SummaryWriter(logdir)
+        writer.add_text("hyperparameters",
+                            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
+                                                                        for key, value in vars(args).items()])))
 
     param_dicts = [{"params": [p for n, p in model.named_parameters()
                                if 'base' not in n and p.requires_grad],
