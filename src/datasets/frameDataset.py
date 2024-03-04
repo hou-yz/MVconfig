@@ -97,7 +97,6 @@ class frameDataset(VisionDataset):
         # Two entries below are used to denote number of frames in a scene
         # Only used when doing reID task.
         self.tracking_scene_len = tracking_scene_len
-        self.curr_scene_len = 0
 
         self.Rworld_shape = list(map(lambda x: x // self.world_reduce, self.worldgrid_shape))
         self.Rimg_shape = np.ceil(np.array(trans_img_shape) // 8).astype(int).tolist()
@@ -288,8 +287,11 @@ class frameDataset(VisionDataset):
             # 1. When not doing testing (doing training), random frames for detection/reID is fine, just randomly reset.
             # 2. When not doing reID, random frames won't bother detection, so it's fine.
             # 3. When testing reID, for the first time we need to reset the environment.
+
+            # NOTE: Since the dataset length is the frame_range, index is [0, len(frame_range) - 1],
+            #       when index % scene_len == 0, we need to call reset to the environment
             random_reset = (self.split != 'test' or not self.reID or 
-                            self.curr_scene_len % self.tracking_scene_len == 0)
+                            index % self.tracking_scene_len == 0)
 
             if index is not None:  # reset (remove) all pedestrians, return DEFAULT images and info!
                 if random_reset:
@@ -307,9 +309,6 @@ class frameDataset(VisionDataset):
                     self.reID_reset_done = True
                 else:
                     observation, info = self.base.env.render_and_update_pedestrian_gts(use_depth)
-
-                # either way, we are getting one frame we need, increment the counter
-                self.curr_scene_len += 1
 
             # get camera matrices
             self.proj_mats = torch.stack([get_worldcoord_from_imgcoord_mat(self.base.env.camera_intrinsics[cam],
