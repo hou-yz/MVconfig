@@ -733,22 +733,26 @@ class PerspectiveTrainer(object):
                 # bev_det is the [B, H*W, 5] tensor, where the last dimension is [x, y, _, _, score]
                 bev_det = torch.concatenate([xys[:, :, :2], torch.ones_like(xys[:, :, :2]), xys[:, :, 2:3]], dim=2)
                 # The id_emb is the [B, H*W, 128] tensor
-                id_embs = xys[:, :, 3:]
+                id_embs = xys[:, :, 3:].numpy()
 
                 # iterating through batches
                 for b in range(B):
-                    # FIXME: tracker doesn't work!!!
                     # Although in the tracker, we will filter the ids based on the threshold, we do it here in advance.
                     ids = bev_det[b, :, 4] > self.args.tracker_conf_thres
+                    # Pre-filtering out, each with shape [k, 5] and [k, 128], k is number of remaining indices
+                    bev_det_subset = bev_det[b, ids]
+                    id_embs_subset = id_embs[b, ids]
                     # Find the positions and scores and apply non-maximum-suppresion
-                    pos, s = bev_det[b, ids, :2], bev_det[b, ids, 4]
+                    pos, s = bev_det_subset[:, :2], bev_det_subset[:, 4]
                     # Applying NMS, and only use a subset of candidates
                     ids, count = nms(pos, s, 20, np.inf)
+                    # We should filter the true_id by using the first k count in ids
+                    true_ids = ids[:count]
                     # Put the bev_detection, id_embs into the tracker, which predicts the tracking results
-                    output_stracks = self.test_tracker.update(bev_det[b, ids], id_embs[b, ids])
+                    output_stracks = self.test_tracker.update(bev_det_subset[true_ids], id_embs_subset[true_ids])
                     # The tracking results are stored in the track_res_list, as the score is not used, we don't save it.
                     track_res_list.extend([
-                        [frame, s.track_id] + s.tlwh.tolist()[:2]
+                        torch.tensor([frame[b], s.track_id] + s.tlwh.tolist()[:2])
                         for s in output_stracks
                     ])
 
@@ -763,7 +767,7 @@ class PerspectiveTrainer(object):
                                                                     dataloader.dataset.frames)
         
         # Add MOTA during testing
-        track_res = torch.cat(track_res_list, dim=0).numpy() if track_res_list else np.empty([0, 4])
+        track_res = torch.stack(track_res_list, dim=0).numpy() if track_res_list else np.empty([0, 4])
         motas, motps, track_precisions, track_recalls = [], [], [], []
 
         # Evaluate tracking performance and convert to percentage
@@ -782,10 +786,10 @@ class PerspectiveTrainer(object):
 
             # Compute the MOTA, MOTP, precision, recall
             summary = mot_metrics_pedestrian(t, gt)
-            motas.append(summary['mota'] * 100)
-            motps.append((1 - summary['motp']) * 100)
-            track_precisions.append(summary['precision'] * 100)
-            track_recalls.append(summary['recall'] * 100)
+            motas.append(summary['mota'].item() * 100)
+            motps.append((1 - summary['motp'].item()) * 100)
+            track_precisions.append(summary['precision'].item() * 100)
+            track_recalls.append(summary['recall'].item() * 100)
 
         # Average the MOTA, MOTP, precision, recall
         mota = np.mean(motas) if motas else 0.
@@ -795,7 +799,7 @@ class PerspectiveTrainer(object):
 
         print(f'Test, cover: {cover_avg / len(dataloader):.3f}, loss: {losses / len(dataloader):.6f}, '
               f'moda: {moda:.1f}%, modp: {modp:.1f}%, prec: {precision:.1f}%, recall: {recall:.1f}%, '
-              f'mota: {mota:.1f}%, motp: {motp:.1f}%, prec_t: {track_precision:.1f}%, recall_t: {track_recall:.1f}%,'
+              f'mota: {mota:.1f}%, motp: {motp:.1f}%, prec_t: {track_precision:.1f}%, recall_t: {track_recall:.1f}%, '
               f'time: {time.time() - t0:.1f}s')
 
         if self.writer is not None:
