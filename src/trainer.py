@@ -495,7 +495,7 @@ class PerspectiveTrainer(object):
                 #               ((torch.sigmoid(heatmap_recons) - overall_heatmap).abs() * overall_covermap).mean()
 
                 # regularization for absolute values
-                tanh_abs_mean = torch.abs(torch.tanh(probs.loc) if not self.agent.use_tanh else probs.loc)
+                tanh_abs_mean = torch.abs(torch.tanh(probs.loc) if not self.agent.clip_action else probs.loc)
                 tanh_abs_loss = torch.clamp(tanh_abs_mean - 0.99, 0).mean() * 100
 
                 loss = (pg_loss - self.args.ent_coef * entropy_loss + v_loss * self.args.vf_coef) * self.args.use_ppo + \
