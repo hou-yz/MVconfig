@@ -61,6 +61,11 @@ def main(args):
     # id_ratio should be set to 0, if not using reID
     if not args.reID:
         args.id_ratio = 0
+    else:
+        # If in reID mode, the split ratio of reID test should be times by a multiplier
+        split_ratio_lst = list(args.split_ratio)
+        split_ratio_lst[-1] *= args.reid_testsize_multiplier
+        args.split_ratio = tuple(split_ratio_lst)
 
     # dataset
     if args.dataset == 'carlax':
@@ -375,6 +380,8 @@ if __name__ == '__main__':
     # Additional settings for the JDETracker and tracking tast compability
     parser.add_argument('--split_ratio', nargs=3, type=float, default=(0.8, 0.1, 0.1),
                         help='train/val/test split ratio')
+    parser.add_argument('--reid_testsize_multiplier', type=int, default=3,
+                        help='number of times to multiply the number of test samples')
     parser.add_argument('--record_loss', action='store_true',
                         help='record loss for each frame')
     parser.add_argument('--tracking_scene_len', type=int, default=60,
