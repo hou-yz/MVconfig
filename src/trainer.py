@@ -157,10 +157,14 @@ class PerspectiveTrainer(object):
                 Image.fromarray(cover_visualize(dataset, model_feat[0], world_heatmap[0], world_gt)
                                 ).save(f'{self.logdir}/cover_{batch_idx}.png')
                 save_image(make_grid(imgs[0], 6, normalize=True), f'{self.logdir}/imgs_{batch_idx}.png')
-            return (model_feat.cpu(), (world_heatmap.detach().cpu(), world_offset.detach().cpu()),
+            return (model_feat.cpu(), (world_feat.detach().cpu(), world_heatmap.detach().cpu(),
+                                       world_offset.detach().cpu(), world_id.detach().cpu()),
                     ({key: value[None] for key, value in world_gt.items()},
-                     {key: value[None] for key, value in imgs_gt.items()}))
+                     {key: value[None] for key, value in imgs_gt.items()}), torch.cat(action_history))
 
+        # NOTE: Not adding tracking to reward computation since tracking task requires multiple frames
+        #       to produce performance evaluation. However, at the end of each episode we only get a single frame.
+        # TODO: But this feature may be implemented in the future - using track metrics as reward functions!!!
         rewards, stats = self.rl_rewards(dataset, action_history, model_feat[0].cpu(), (world_heatmap, world_offset),
                                          world_gt, frame, proj_mats, imgs_gt)
         coverages, task_loss, moda, min_dist = stats
@@ -207,8 +211,9 @@ class PerspectiveTrainer(object):
                 # self.writer.add_image("images/imgs", make_grid(torch.cat(imgs), normalize=True),
                 #                       self.rl_global_step, dataformats='CHW')
 
-        return model_feat, (world_heatmap, world_offset), ({key: value[None] for key, value in world_gt.items()},
-                                                           {key: value[None] for key, value in imgs_gt.items()})
+        return (model_feat, (world_feat, world_heatmap, world_offset, world_id),
+                                ({key: value[None] for key, value in world_gt.items()},
+                                 {key: value[None] for key, value in imgs_gt.items()}), torch.cat(action_history))
 
     # https://github.com/vwxyzjn/ppo-implementation-details
     def rl_rewards(self, dataset, action_history, model_feat, world_res, world_gt, frame, proj_mats, imgs_gt):
@@ -578,9 +583,19 @@ class PerspectiveTrainer(object):
             if self.args.base_lr_ratio == 0:
                 self.model.base.eval()
             if self.args.interactive:
-                # FIXME: Consider `world_id` and `img_id` usage in "interactive mode"!!!
+                # NOTE: Already considered the reID usage in searching camera configs.
+                #       However, it seems impossible to add the tracking task itself as an reward function.
+                #       Tracking must have multiple frames to compute the IoU between the predicted and ground truth.
+                #       But in the RL setup, one episode is consist of N camera configs of one scene. The reward 
+                #       is given at the end of each scene as the single frame detection performance.
+
+                # NOTE: The `world_id` and `imgs_id` seems only useful in the training code
+                #       below for training a discriminative feature for identifying different pedestrians.
+
+                # NOTE: Let the expand_episode return the `world_id` and `imgs_id` in interactive mode for tuning
+                #       the reID feature. Otherwise it will throw an error
                 self.agent.eval()
-                feat, (world_heatmap, world_offset), (world_gt, imgs_gt) = self.expand_episode(
+                feat, (world_feat, world_heatmap, world_offset, world_id), (world_gt, imgs_gt), action_history = self.expand_episode(
                     dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
                     True, visualize=self.rl_global_step % 500 == 0,
                     override_action=(torch.rand([N, len(dataloader.dataset.action_names)]) * 2 - 1
@@ -597,7 +612,8 @@ class PerspectiveTrainer(object):
             # MVDet loss - (w_loss = center_loss + offset_loss + id_loss)
             if self.args.use_mse:
                 w_loss = F.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device))
-                self.writer.add_scalar("mvdet/w_loss", w_loss.item(), step)
+                if self.writer is not None:
+                    self.writer.add_scalar("mvdet/w_loss", w_loss.item(), step)
             else:
                 loss_w_hm = focal_loss(world_heatmap, world_gt['heatmap'])
                 loss_w_off = regL1loss(world_offset, world_gt['reg_mask'], world_gt['idx'], world_gt['offset'])
@@ -605,9 +621,10 @@ class PerspectiveTrainer(object):
                 w_loss = loss_w_hm + loss_w_off + self.args.id_ratio * loss_w_id
 
                 # Add loss information into tensorboard for debug
-                self.writer.add_scalar("mvdet/loss_w_hm", loss_w_hm.item(), step)
-                self.writer.add_scalar("mvdet/loss_w_off", loss_w_off.item(), step)
-                self.writer.add_scalar("mvdet/loss_w_id", loss_w_id.item(), step)
+                if self.writer is not None:
+                    self.writer.add_scalar("mvdet/loss_w_hm", loss_w_hm.item(), step)
+                    self.writer.add_scalar("mvdet/loss_w_off", loss_w_off.item(), step)
+                    self.writer.add_scalar("mvdet/loss_w_id", loss_w_id.item(), step)
             
             # When not training camera configs, compute per-view detection losses, including 
             # center_loss, offset_loss and wh_loss. When searching best camera configs, we don't
@@ -615,7 +632,8 @@ class PerspectiveTrainer(object):
             if not self.args.interactive:
                 if self.args.use_mse:
                     img_loss = F.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
-                    self.writer.add_scalar("mvdet/img_loss", img_loss.item(), step)
+                    if self.writer is not None:
+                        self.writer.add_scalar("mvdet/img_loss", img_loss.item(), step)
                 else:
                     loss_img_hm = focal_loss(imgs_heatmap, imgs_gt['heatmap'])
                     loss_img_off = regL1loss(imgs_offset, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['offset'])
@@ -624,17 +642,19 @@ class PerspectiveTrainer(object):
                     img_loss = loss_img_hm + loss_img_off + loss_img_wh * 0.1 + self.args.id_ratio * loss_img_id
 
                     # Add loss information into tensorboard for debug
-                    self.writer.add_scalar("mvdet/loss_img_hm", loss_img_hm.item(), step)
-                    self.writer.add_scalar("mvdet/loss_img_off", loss_img_off.item(), step)
-                    self.writer.add_scalar("mvdet/loss_img_wh", loss_img_wh.item(), step)
-                    self.writer.add_scalar("mvdet/loss_img_id", loss_img_id.item(), step)
+                    if self.writer is not None:
+                        self.writer.add_scalar("mvdet/loss_img_hm", loss_img_hm.item(), step)
+                        self.writer.add_scalar("mvdet/loss_img_off", loss_img_off.item(), step)
+                        self.writer.add_scalar("mvdet/loss_img_wh", loss_img_wh.item(), step)
+                        self.writer.add_scalar("mvdet/loss_img_id", loss_img_id.item(), step)
             else:
                 img_loss = torch.zeros([]).cuda()
 
             loss = w_loss + img_loss / N * self.args.alpha
             losses += loss.item()
 
-            self.writer.add_scalar("mvdet/loss", loss.item(), step)
+            if self.writer:
+                self.writer.add_scalar("mvdet/loss", loss.item(), step)
 
             # train MVDet
             optimizers[0].zero_grad()
@@ -692,9 +712,12 @@ class PerspectiveTrainer(object):
                 if self.args.interactive:
                     self.agent.eval()
                     assert B == 1, 'only support batch_size/num_envs == 1'
-                    feat, (world_heatmap, world_offset), (world_gt, imgs_gt) = self.expand_episode(
+                    feat, (world_feat, world_heatmap, world_offset, world_id), (world_gt, imgs_gt), action_history = self.expand_episode(
                         dataloader.dataset, (step, configs, imgs, aug_mats, proj_mats),
                         visualize=(batch_idx < 5), batch_idx=batch_idx, override_action=override_action)
+                    # NOTE: Record the first action and use it for the all future steps for interactive mode
+                    if override_action is None:
+                        override_action = action_history
                 else:
                     feat, _ = self.model.get_feat(imgs.cuda(), aug_mats, proj_mats)
                     world_feat, (world_heatmap, world_offset, world_id) = self.model.get_output(feat.cuda())
@@ -813,4 +836,4 @@ class PerspectiveTrainer(object):
                 self.writer.add_scalar("results/precision_t", track_precision, self.rl_global_step if self.args.interactive else epoch)
                 self.writer.add_scalar("results/recall_t", track_recall, self.rl_global_step if self.args.interactive else epoch)
 
-        return losses / len(dataloader), [moda, modp, precision, recall]
+        return losses / len(dataloader), [moda, modp, precision, recall]#

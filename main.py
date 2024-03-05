@@ -139,7 +139,7 @@ def main(args):
     model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim,
                   args.dropout, check_visible=args.interactive).cuda()
     control_module = CamControl(train_set, args.hidden_dim, args.actstd_init, args.control_arch,
-                                use_tanh=args.action_mapping == 'clip', trig_yaw_coef=args.div_yaw_coef
+                                clip_action=args.action_mapping == 'clip', trig_yaw_coef=args.div_yaw_coef
                                 ).cuda() if args.interactive else None
 
     # load checkpoint
@@ -148,7 +148,7 @@ def main(args):
         load_dir = f'logs/{args.dataset}/{args.resume}' if args.resume else None
         if not os.path.exists(f'{load_dir}/model.pth'):
             # with open(f'logs/multiviewx/{args.arch}_None.txt', 'r') as fp:
-            with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}.txt', 'r') as fp:
+            with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}{"_reID" if args.reID else ""}.txt', 'r') as fp:
                 load_dir = fp.read()
         print(f'loading checkpoint: {load_dir}')
         pretrained_dict = torch.load(f'{load_dir}/model.pth')
@@ -214,6 +214,10 @@ def main(args):
     test_loss_s = []
     test_prec_s = []
 
+    # Default value for epoch. When not training, epoch is not initialized, which
+    # would lead to a bug.
+    epoch = 1
+
     # learn
     use_best_action = args.random_search or args.reward == 'visibility'
     if not args.eval:
@@ -253,7 +257,8 @@ def main(args):
     if args.interactive and not is_debug:
         writer.close()
     if not args.interactive and not args.eval:
-        with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}.txt', 'w') as fp:
+        # We need to split the ckpt naming w, w/o reID setup
+        with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}{"_reID" if args.reID else ""}.txt', 'w') as fp:
             fp.write(logdir)
 
 
@@ -293,7 +298,8 @@ if __name__ == '__main__':
                         choices=['encoder', 'transformer', 'conv', 'linear'])
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
     parser.add_argument('--euler2vec', type=str, default='yaw')
-    parser.add_argument("--action_mapping", type=str, default='tanh', choices=['clip', 'tanh'])
+    parser.add_argument("--action_mapping", type=str, default='tanh', choices=['clip', 'tanh'],
+                        help="the mapping of the action space")
     # https://arxiv.org/abs/2006.05990
     parser.add_argument('--actstd_init', type=float, default=0.5, help='initial value actor std')
     parser.add_argument("--reward", default='moda')

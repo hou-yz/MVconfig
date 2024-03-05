@@ -97,6 +97,7 @@ class frameDataset(VisionDataset):
         # Two entries below are used to denote number of frames in a scene
         # Only used when doing reID task.
         self.tracking_scene_len = tracking_scene_len
+        self.curr_scene_len = 0
 
         self.Rworld_shape = list(map(lambda x: x // self.world_reduce, self.worldgrid_shape))
         self.Rimg_shape = np.ceil(np.array(trans_img_shape) // 8).astype(int).tolist()
@@ -138,10 +139,6 @@ class frameDataset(VisionDataset):
 
             # In CarlaX, the pedestrian IDs are just the blueprint IDs and it is fixed for all scenes
             self.pid_dict = {i: i for i in range(len(self.base.env.pedestrian_bps))}
-
-            # In CarlaX and reID mode, we need to use a counter to keep track of the current frame
-            # since we will be rendering a few frames before we reset the environment.
-            self.reID_reset_done = False
 
             # generate same pedestrian layout for the same frame
             if seed is not None:
@@ -287,28 +284,57 @@ class frameDataset(VisionDataset):
             # 1. When not doing testing (doing training), random frames for detection/reID is fine, just randomly reset.
             # 2. When not doing reID, random frames won't bother detection, so it's fine.
             # 3. When testing reID, for the first time we need to reset the environment.
-
-            # NOTE: Since the dataset length is the frame_range, index is [0, len(frame_range) - 1],
-            #       when index % scene_len == 0, we need to call reset to the environment
-            random_reset = (self.split != 'test' or not self.reID or 
-                            index % self.tracking_scene_len == 0)
+            need_reset = (self.split != 'test' or not self.reID or 
+                            self.curr_scene_len % self.tracking_scene_len == 0)
 
             if index is not None:  # reset (remove) all pedestrians, return DEFAULT images and info!
-                if random_reset:
+                # This will be called when enumerating through the dataloader/dataset
+                if need_reset:
                     observation, info = self.base.env.reset(seed=self.fixed_seeds[index])
+                    # When reset the scene, we resent the counter
+                    self.curr_scene_len = 0
                 self.cur_frame = self.frames[index]
+
+                if self.interactive:
+                    # A bit hacky, but we need to reset the step counter to ensure that the masks 
+                    # are always correct.
+                    self.base.env.step_counter = 0
             else:
                 assert self.interactive
-            
-            if (not self.interactive or index is None):  # only spawn pedestrian after interactive steps (index==None)
+
+            # 1. not self.interactive -> case for fixed camera config tasks (det/reID)
+            # 2. index is None -> interactive mode, the second time calling __getitem__
+            #             (the first time is for resetting the environment)
+
+            # only spawn pedestrian after interactive steps (index==None)
+            # This check enforces no pedestrians are spawned when we decide camera configs
+            if (not self.interactive or index is None):
                 use_depth = ('train' in self.split) and use_depth
                 # only when resetting the environment, we need to spawn the pedestrians and render
                 # otherwise, we render continuous frames
-                if random_reset:
+                if need_reset:
+                    # render the first frame, need to spawn
                     observation, info = self.base.env.spawn_and_render(use_depth)
-                    self.reID_reset_done = True
                 else:
+                    # render the next frame, no need to spawn
                     observation, info = self.base.env.render_and_update_pedestrian_gts(use_depth)
+
+                # either way, we get a new image (frame)
+                self.curr_scene_len += 1
+            else:
+                # NOTE: This will be called when `interactive`, `reID`, `test` happens. 
+                #       When enumerate through the dataset, we have index but we don't have to reset environment.
+                #       Some local variables are not initialized and would lead to an error.
+                observation = {
+                    "images": self.base.env.default_imgs,
+                    "camera_configs": {cam: self.base.env.encode_camera_cfg(self.base.env.camera_configs[cam])
+                                       for cam in range(self.num_cam)},
+                    "step": self.base.env.step_counter
+                }
+                info = {"pedestrian_gts": [],
+                        "depths": {},
+                        "camera_intrinsics": self.base.env.camera_intrinsics,
+                        "camera_extrinsics": self.base.env.camera_extrinsics}  # Set any additional information
 
             # get camera matrices
             self.proj_mats = torch.stack([get_worldcoord_from_imgcoord_mat(self.base.env.camera_intrinsics[cam],

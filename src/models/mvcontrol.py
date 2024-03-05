@@ -59,7 +59,7 @@ class ConvDecoder(nn.Module):
 
 
 class CamControl(nn.Module):
-    def __init__(self, dataset, hidden_dim, actstd_init=1.0, arch='encoder', use_tanh=False, trig_yaw_coef=1.0):
+    def __init__(self, dataset, hidden_dim, actstd_init=1.0, arch='encoder', clip_action=False, trig_yaw_coef=1.0):
         super().__init__()
         self.world_reduce, self.img_reduce = 40, 120
         self.Rworld_shape = tuple(map(lambda x: x // self.world_reduce, dataset.worldgrid_shape))
@@ -67,7 +67,7 @@ class CamControl(nn.Module):
                                                         np.diag([self.world_reduce, self.world_reduce, 1]))
         self.action_names = dataset.action_names
         self.arch = arch
-        self.use_tanh = use_tanh
+        self.clip_action = clip_action
         self.trig_yaw_coef = trig_yaw_coef
         # self.other_idx = list(range(len(dataset.action_names)))
         if 'dir_x' in self.action_names and 'dir_y' in self.action_names:
@@ -229,7 +229,7 @@ class CamControl(nn.Module):
         action_mean = self.actor_mean(x)
         action_std = F.softplus(self.actor_std + np.log(np.exp(self.actstd_init) - 1))
         # other action dimensions
-        if self.use_tanh:
+        if self.clip_action:
             action_mean = F.tanh(action_mean)
             # trig yaw
             action_mean = (self.trig_yaw_coef * self.trig_yaw_idx + ~self.trig_yaw_idx).to(device) * action_mean
@@ -299,7 +299,7 @@ if __name__ == '__main__':
     configs = configs.repeat([B, 1, 1])
     aug_mats, proj_mats = aug_mats.repeat([B, 1, 1, 1]), proj_mats.repeat([B, 1, 1, 1])
 
-    model = CamControl(dataset, C, arch='encoder', actstd_init=0.5, use_tanh=True).cuda()
+    model = CamControl(dataset, C, arch='encoder', actstd_init=0.5, clip_action=True).cuda()
     # state_dict = torch.load(
     #     '../../logs/carlax/town05market_RL_fix_moda_E_steps512_b128_e10_lr0.0001_clip_ent0.001_cover0.0_divsteps0.1mu0.0_dir0.1_det_TASK_max_e50_2023-11-15_15-28-26/control_module.pth')
     # model.load_state_dict(state_dict)
