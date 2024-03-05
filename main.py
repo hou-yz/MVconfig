@@ -57,6 +57,15 @@ def main(args):
 
     # increase process niceness
     # os.nice(10)
+    
+    # id_ratio should be set to 0, if not using reID
+    if not args.reID:
+        args.id_ratio = 0
+    else:
+        # If in reID mode, the split ratio of reID test should be times by a multiplier
+        split_ratio_lst = list(args.split_ratio)
+        split_ratio_lst[-1] *= args.reid_testsize_multiplier
+        args.split_ratio = tuple(split_ratio_lst)
 
     # dataset
     if args.dataset == 'carlax':
@@ -89,12 +98,14 @@ def main(args):
         args.batch_size = 1 if args.batch_size is None else args.batch_size
         args.interactive = False
 
-    train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
+    train_set = frameDataset(base, split='trainval', reID=args.reID, world_reduce=args.world_reduce,
                              world_kernel_size=args.world_kernel_size, img_kernel_size=args.img_kernel_size,
-                             interactive=args.interactive, augmentation=args.augmentation, seed=args.carla_seed)
-    test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
+                             split_ratio=args.split_ratio, interactive=args.interactive, augmentation=args.augmentation,
+                             tracking_scene_len=args.tracking_scene_len, seed=args.carla_seed)
+    test_set = frameDataset(base, split='test', reID=args.reID, world_reduce=args.world_reduce,
                             world_kernel_size=args.world_kernel_size, img_kernel_size=args.img_kernel_size,
-                            interactive=args.interactive, seed=args.carla_seed)
+                            split_ratio=args.split_ratio, interactive=args.interactive,
+                            tracking_scene_len=args.tracking_scene_len, seed=args.carla_seed)
 
     def seed_worker(worker_id):
         worker_seed = torch.initial_seed() % 2 ** 32
@@ -114,8 +125,9 @@ def main(args):
                    f'{"det_" if args.rl_deterministic else ""}' if args.interactive else '')
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}' \
              f'{f"{args.carla_cfg}_{RL_settings}" if args.dataset == "carlax" else ""}' \
-             f'TASK_{args.aggregation}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
-        else f'logs/{args.dataset}/EVAL_{f"{args.carla_cfg}" if args.dataset == "carlax" else ""}{args.resume}'
+             f'TASK_{"reID" if args.reID else ""}_{args.aggregation}_e{args.epochs}_' \
+             f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
+                else f'logs/{args.dataset}/EVAL_{f"{args.carla_cfg}" if args.dataset == "carlax" else ""}{args.resume}'
     os.makedirs(logdir, exist_ok=True)
     copy_tree('src', logdir + '/scripts/src')
     copy_tree('cfg', logdir + '/scripts/cfg')
@@ -132,7 +144,7 @@ def main(args):
     model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim,
                   args.dropout, check_visible=args.interactive).cuda()
     control_module = CamControl(train_set, args.hidden_dim, args.actstd_init, args.control_arch,
-                                use_tanh=args.action_mapping == 'clip', trig_yaw_coef=args.div_yaw_coef
+                                clip_action=args.action_mapping == 'clip', trig_yaw_coef=args.div_yaw_coef
                                 ).cuda() if args.interactive else None
 
     # load checkpoint
@@ -141,14 +153,14 @@ def main(args):
         load_dir = f'logs/{args.dataset}/{args.resume}' if args.resume else None
         if not os.path.exists(f'{load_dir}/model.pth'):
             # with open(f'logs/multiviewx/{args.arch}_None.txt', 'r') as fp:
-            with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}.txt', 'r') as fp:
+            with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}{"_reID" if args.reID else ""}.txt', 'r') as fp:
                 load_dir = fp.read()
         print(f'loading checkpoint: {load_dir}')
         pretrained_dict = torch.load(f'{load_dir}/model.pth')
         model_dict = model.state_dict()
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
         model_dict.update(pretrained_dict)
-        model.load_state_dict(model_dict)
+        model.load_state_dict(model_dict, strict=False)  # the model may not have the reid head weights
         if args.interactive:
             if args.resume:
                 control_module.load_state_dict(torch.load(f'logs/{args.dataset}/{args.resume}/control_module.pth'))
@@ -158,6 +170,14 @@ def main(args):
                 writer.add_text("hyperparameters",
                                 "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
                                                                          for key, value in vars(args).items()])))
+
+    if args.record_loss and not writer:
+        # The case where we intentionally record the loss for each frame
+        # Only initialize the writer if it was not initialized before
+        writer = SummaryWriter(logdir)
+        writer.add_text("hyperparameters",
+                            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|"
+                                                                        for key, value in vars(args).items()])))
 
     param_dicts = [{"params": [p for n, p in model.named_parameters()
                                if 'base' not in n and p.requires_grad],
@@ -199,6 +219,10 @@ def main(args):
     test_loss_s = []
     test_prec_s = []
 
+    # Default value for epoch. When not training, epoch is not initialized, which
+    # would lead to a bug.
+    epoch = 1
+
     # learn
     use_best_action = args.random_search or args.reward == 'visibility'
     if not args.eval:
@@ -207,8 +231,8 @@ def main(args):
             train_loss, train_prec = trainer.train(epoch, train_loader, (optimizer_model, optimizer_agent),
                                                    (scheduler_model, scheduler_agent))
             print('Testing...')
-            test_loss, test_prec = trainer.test(test_loader, trainer.best_action if use_best_action else None,
-                                                visualize=True)
+            test_loss, test_prec = trainer.test(test_loader, epoch,
+                                                trainer.best_action if use_best_action else None, visualize=True)
 
             # draw & save
             x_epoch.append(epoch)
@@ -227,10 +251,10 @@ def main(args):
     print(logdir)
     if args.interactive:
         print(control_module.expand_mean_actions(test_set))
-    trainer.test(test_loader)
+    trainer.test(test_loader, epoch + 1)
     if args.interactive:
         print('Test recorded best...')
-        trainer.test(test_loader, trainer.best_action)
+        trainer.test(test_loader, epoch + 2, trainer.best_action)
     if args.dataset == 'carlax':
         base.env.close()
         if not is_debug:
@@ -238,7 +262,8 @@ def main(args):
     if args.interactive and not is_debug:
         writer.close()
     if not args.interactive and not args.eval:
-        with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}.txt', 'w') as fp:
+        # We need to split the ckpt naming w, w/o reID setup
+        with open(f'logs/{args.dataset}/{args.arch}_{args.carla_cfg}{"_reID" if args.reID else ""}.txt', 'w') as fp:
             fp.write(logdir)
 
 
@@ -278,7 +303,8 @@ if __name__ == '__main__':
                         choices=['encoder', 'transformer', 'conv', 'linear'])
     parser.add_argument('--control_lr', type=float, default=1e-4, help='learning rate for MVcontrol')
     parser.add_argument('--euler2vec', type=str, default='yaw')
-    parser.add_argument("--action_mapping", type=str, default='tanh', choices=['clip', 'tanh'])
+    parser.add_argument("--action_mapping", type=str, default='tanh', choices=['clip', 'tanh'],
+                        help="the mapping of the action space")
     # https://arxiv.org/abs/2006.05990
     parser.add_argument('--actstd_init', type=float, default=0.5, help='initial value actor std')
     parser.add_argument("--reward", default='moda')
@@ -341,7 +367,7 @@ if __name__ == '__main__':
     parser.add_argument('--reID', action='store_true')
     parser.add_argument('--augmentation', type=str, default='affine')
     parser.add_argument('--dropout', type=float, default=0.0)
-    parser.add_argument('--id_ratio', type=float, default=0)
+    parser.add_argument('--id_ratio', type=float, default=0.6)  # The default ratio is subject to change
     parser.add_argument('--cls_thres', type=float, default=0.6)
     parser.add_argument('--alpha', type=float, default=0.0, help='ratio for per view loss')
     parser.add_argument('--use_mse', type=str2bool, default=False)
@@ -351,6 +377,19 @@ if __name__ == '__main__':
     parser.add_argument('--world_reduce', type=int, default=4)
     parser.add_argument('--world_kernel_size', type=int, default=10)
     parser.add_argument('--img_kernel_size', type=int, default=10)
+    # Additional settings for the JDETracker and tracking tast compability
+    parser.add_argument('--split_ratio', nargs=3, type=float, default=(0.8, 0.1, 0.1),
+                        help='train/val/test split ratio')
+    parser.add_argument('--reid_testsize_multiplier', type=int, default=3,
+                        help='number of times to multiply the number of test samples')
+    parser.add_argument('--record_loss', action='store_true',
+                        help='record loss for each frame')
+    parser.add_argument('--tracking_scene_len', type=int, default=60,
+                        help='number of frames for each tracking scene')
+    parser.add_argument('--tracker_conf_thres', type=float, default=0.4,
+                        help='object confidence threshold')
+    parser.add_argument('--tracker_gating_threshold', type=float, default=1000,
+                        help='gating threshold for motion fusion matching')
 
     args = parser.parse_args()
 

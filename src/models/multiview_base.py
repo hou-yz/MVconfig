@@ -46,7 +46,7 @@ class MultiviewBase(nn.Module):
     def forward(self, imgs, M=None, proj_mats=None, visualize=False):
         if self.control_module is None:
             feat, aux_res = self.get_feat(imgs, M, proj_mats, visualize)
-            overall_res = self.get_output(feat, visualize)
+            world_feat, overall_res = self.get_output(feat, visualize)
             return overall_res, aux_res
         else:
             raise NotImplementedError
