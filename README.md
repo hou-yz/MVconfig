@@ -9,6 +9,12 @@
   - [Usage](#usage)
 
 ## Dependencies
+0. Create python environment with python=3.8
+   ```bash
+   conda create -n mvconfig python=3.8
+   conda activate mvconfig
+   ```
+
 1. Please install [PyTorch](https://pytorch.org/get-started/locally/) with CUDA support with
    ```bash
    pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
@@ -18,6 +24,16 @@
    ```bash
    pip install -r requirements.txt
    ```
+   and then install lap separately via
+   ```bash
+   conda install -c conda-forge lap=0.4.0
+   ```
+
+4. Verify that Carla works through docker container
+   ```bash
+   docker run --privileged --gpus 1 --net=host -e DISPLAY=$DISPLAY carlasim/carla:0.9.14 /bin/bash ./CarlaUE4.sh
+   ```
+   
 
 ## Data Preparation
 Running the **MVconfig** code requires the [CARLA simulator](https://carla.org/). We recommend using the CARLA Docker image.
