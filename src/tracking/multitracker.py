@@ -244,7 +244,7 @@ class JDETracker(object):
 
         remain_inds = dets[:, 4] > self.det_thresh
         dets = dets[remain_inds]
-        id_feature = id_feature[remain_inds]
+        id_feature = id_feature[remain_inds].numpy()
 
         if len(dets) > 0:
             """Detections"""
@@ -343,11 +343,11 @@ class JDETracker(object):
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
 
-        print('===========Frame {}=========='.format(self.frame_id))
-        print('Activated: {}'.format([track.track_id for track in activated_starcks]))
-        print('Refind: {}'.format([track.track_id for track in refind_stracks]))
-        print('Lost: {}'.format([track.track_id for track in lost_stracks]))
-        print('Removed: {}'.format([track.track_id for track in removed_stracks]))
+        # print('===========Frame {}=========='.format(self.frame_id))
+        # print('Activated: {}'.format([track.track_id for track in activated_starcks]))
+        # print('Refind: {}'.format([track.track_id for track in refind_stracks]))
+        # print('Lost: {}'.format([track.track_id for track in lost_stracks]))
+        # print('Removed: {}'.format([track.track_id for track in removed_stracks]))
 
         return output_stracks
 

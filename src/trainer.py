@@ -756,7 +756,7 @@ class PerspectiveTrainer(object):
                 # bev_det is the [B, H*W, 5] tensor, where the last dimension is [x, y, _, _, score]
                 bev_det = torch.concatenate([xys[:, :, :2], torch.ones_like(xys[:, :, :2]), xys[:, :, 2:3]], dim=2)
                 # The id_emb is the [B, H*W, 128] tensor
-                id_embs = xys[:, :, 3:].numpy()
+                id_embs = xys[:, :, 3:]
 
                 # iterating through batches
                 for b in range(B):
